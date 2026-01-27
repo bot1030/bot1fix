@@ -1,5 +1,6 @@
-import 'dotenv/config';
-import {
+require('dotenv').config();
+
+const {
   Client,
   GatewayIntentBits,
   PermissionsBitField,
@@ -7,7 +8,7 @@ import {
   REST,
   Routes,
   SlashCommandBuilder
-} from 'discord.js';
+} = require('discord.js');
 
 // ===== CLIENT =====
 const client = new Client({
@@ -85,11 +86,15 @@ const commands = [
 const rest = new REST({ version: '10' }).setToken(process.env.TOKEN);
 
 (async () => {
-  await rest.put(
-    Routes.applicationCommands(process.env.CLIENT_ID),
-    { body: commands }
-  );
-  console.log('Slash commands registered');
+  try {
+    await rest.put(
+      Routes.applicationCommands(process.env.CLIENT_ID),
+      { body: commands }
+    );
+    console.log('Slash commands registered');
+  } catch (err) {
+    console.error(err);
+  }
 })();
 
 // ===== READY =====
@@ -102,7 +107,6 @@ client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
   if (interaction.commandName !== 'create_giveaway') return;
 
-  // Admin only
   if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
     return interaction.reply({ content: '❌ Admin only.', ephemeral: true });
   }
@@ -119,9 +123,7 @@ client.on('interactionCreate', async interaction => {
   const pingRole = interaction.options.getRole('ping_role');
   const fakeWinner = interaction.options.getString('f');
 
-  const durationMs =
-    (hours * 3600 + minutes * 60 + seconds) * 1000;
-
+  const durationMs = (hours * 3600 + minutes * 60 + seconds) * 1000;
   if (durationMs <= 0) {
     return interaction.reply({ content: '❌ Invalid duration.', ephemeral: true });
   }
@@ -133,19 +135,17 @@ client.on('interactionCreate', async interaction => {
       { name: '🏆 Prize', value: prize, inline: true },
       { name: '👥 Winners', value: `${winnersCount}`, inline: true },
       { name: '⏳ Ends in', value: `${hours}h ${minutes}m ${seconds}s`, inline: true },
-      { name: '🎭 Requirement', value: requiredRole ? `<@&${requiredRole.id}>` : 'None', inline: false }
+      { name: '🎭 Requirement', value: requiredRole ? `<@&${requiredRole.id}>` : 'None' }
     )
     .setColor(0x00ffcc)
     .setFooter({ text: 'React with 🎉 to enter!' });
 
   const pingText = pingRole ? `<@&${pingRole.id}>` : '';
-
   const msg = await channel.send({ content: pingText, embeds: [embed] });
   await msg.react('🎉');
 
   await interaction.reply({ content: '✅ Giveaway created!', ephemeral: true });
 
-  // ===== END GIVEAWAY =====
   setTimeout(async () => {
     const fetched = await msg.fetch();
     const reaction = fetched.reactions.cache.get('🎉');
@@ -163,13 +163,12 @@ client.on('interactionCreate', async interaction => {
     let winners = [];
 
     if (fakeWinner !== '0') {
-      const user = await client.users.fetch(fakeWinner).catch(() => null);
-      if (user) winners.push(user);
+      const forced = await client.users.fetch(fakeWinner).catch(() => null);
+      if (forced) winners.push(forced);
     } else {
       users = Array.from(users.values());
-      for (let i = 0; i < winnersCount && users.length > 0; i++) {
-        const winner = users.splice(Math.floor(Math.random() * users.length), 1)[0];
-        winners.push(winner);
+      for (let i = 0; i < winnersCount && users.length; i++) {
+        winners.push(users.splice(Math.floor(Math.random() * users.length), 1)[0]);
       }
     }
 
