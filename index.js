@@ -10,18 +10,20 @@ const {
   EmbedBuilder
 } = require("discord.js");
 
+/* =======================
+   CLIENT
+======================= */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMessageReactions,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMessageReactions
   ],
   partials: [Partials.Message, Partials.Channel, Partials.Reaction]
 });
 
 /* =======================
-   IN-MEMORY GIVEAWAYS
+   GIVEAWAY STORAGE
 ======================= */
 const giveaways = new Map();
 
@@ -35,24 +37,23 @@ const commands = [
     default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
     options: [
       { name: "channel", description: "Giveaway channel", type: 7, required: true },
-      { name: "title", description: "Giveaway title", type: 3, required: true },
-      { name: "description", description: "Giveaway description", type: 3, required: true },
+      { name: "title", description: "Title", type: 3, required: true },
+      { name: "description", description: "Description", type: 3, required: true },
       { name: "prize", description: "Prize", type: 3, required: true },
       { name: "winners", description: "Number of winners", type: 4, required: true },
       { name: "hours", description: "Hours", type: 4, required: true },
       { name: "minutes", description: "Minutes", type: 4, required: true },
       { name: "seconds", description: "Seconds", type: 4, required: true },
 
-      // OPTIONAL (must be AFTER required)
+      // OPTIONAL (must be after required)
       { name: "role", description: "Required role", type: 8, required: false },
       { name: "ping_role", description: "Ping role", type: 8, required: false },
-      { name: "f", description: "User ID or 0", type: 3, required: false }
+      { name: "f", description: "Fake winner ID or 0", type: 3, required: false }
     ]
   },
-
   {
     name: "reroll",
-    description: "Reroll a giveaway winner",
+    description: "Reroll a giveaway (admin only)",
     default_member_permissions: PermissionsBitField.Flags.Administrator.toString(),
     options: [
       { name: "code", description: "Giveaway code", type: 3, required: true }
@@ -63,7 +64,7 @@ const commands = [
 /* =======================
    REGISTER COMMANDS
 ======================= */
-const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
+const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
 (async () => {
   try {
@@ -106,10 +107,10 @@ client.on("interactionCreate", async interaction => {
     const pingRole = interaction.options.getRole("ping_role");
     const fakeWinner = interaction.options.getString("f") || "0";
 
-    const durationMs =
+    const duration =
       ((hours * 3600) + (minutes * 60) + seconds) * 1000;
 
-    if (durationMs <= 0) {
+    if (duration <= 0) {
       return interaction.reply({ content: "❌ Invalid duration.", ephemeral: true });
     }
 
@@ -118,53 +119,55 @@ client.on("interactionCreate", async interaction => {
     const embed = new EmbedBuilder()
       .setTitle(`🎉 ${title}`)
       .setDescription(
-        `${description}\n\n🏆 **Prize:** ${prize}\n👥 **Winners:** ${winners}\n⏰ **Ends:** <t:${Math.floor((Date.now() + durationMs) / 1000)}:R>`
+        `${description}\n\n🏆 **Prize:** ${prize}\n👥 **Winners:** ${winners}\n⏰ **Ends:** <t:${Math.floor((Date.now() + duration) / 1000)}:R>`
       )
-      .setColor(0x00FFAA)
+      .setColor(0x2ecc71)
       .setFooter({ text: `Code: ${code}` });
 
-    const msg = await channel.send({
+    const message = await channel.send({
       content: pingRole ? `<@&${pingRole.id}>` : null,
       embeds: [embed]
     });
 
-    await msg.react("🎉");
+    await message.react("🎉");
 
     giveaways.set(code, {
       channelId: channel.id,
-      messageId: msg.id,
+      messageId: message.id,
       winners,
       requiredRoleId: requiredRole?.id || null,
       fakeWinner,
       ended: false
     });
 
-    interaction.reply({ content: "✅ Giveaway created!", ephemeral: true });
+    interaction.reply({ content: "✅ Giveaway created.", ephemeral: true });
 
     setTimeout(async () => {
       const data = giveaways.get(code);
       if (!data) return;
 
       const ch = await client.channels.fetch(data.channelId);
-      const m = await ch.messages.fetch(data.messageId);
-      const reaction = m.reactions.cache.get("🎉");
-
+      const msg = await ch.messages.fetch(data.messageId);
+      const reaction = msg.reactions.cache.get("🎉");
       if (!reaction) return;
 
       let users = (await reaction.users.fetch()).filter(u => !u.bot);
 
       if (data.requiredRoleId) {
         users = users.filter(u =>
-          ch.guild.members.cache.get(u.id)?.roles.cache.has(data.requiredRoleId)
+          ch.guild.members.cache
+            .get(u.id)
+            ?.roles.cache.has(data.requiredRoleId)
         );
       }
 
       let winnersList = [];
 
       if (data.fakeWinner !== "0") {
-        winnersList.push(`<@${data.fakeWinner}>`);
+        winnersList = [`<@${data.fakeWinner}>`];
       } else {
-        winnersList = users.random(Math.min(users.size, data.winners)).map(u => `<@${u.id}>`);
+        winnersList = users.random(Math.min(users.size, data.winners))
+          .map(u => `<@${u.id}>`);
       }
 
       data.ended = true;
@@ -174,10 +177,10 @@ client.on("interactionCreate", async interaction => {
           new EmbedBuilder()
             .setTitle("🎊 Giveaway Ended!")
             .setDescription(`🏆 **Winner(s):** ${winnersList.join(", ")}`)
-            .setColor(0xFFD700)
+            .setColor(0xf1c40f)
         ]
       });
-    }, durationMs);
+    }, duration);
   }
 
   /* ===== REROLL ===== */
@@ -190,12 +193,14 @@ client.on("interactionCreate", async interaction => {
     }
 
     const ch = await client.channels.fetch(data.channelId);
-    const m = await ch.messages.fetch(data.messageId);
-    const reaction = m.reactions.cache.get("🎉");
-
+    const msg = await ch.messages.fetch(data.messageId);
+    const reaction = msg.reactions.cache.get("🎉");
     if (!reaction) return;
 
     let users = (await reaction.users.fetch()).filter(u => !u.bot);
+    if (users.size === 0) {
+      return interaction.reply({ content: "❌ No users to reroll.", ephemeral: true });
+    }
 
     const winner = users.random();
 
@@ -204,16 +209,16 @@ client.on("interactionCreate", async interaction => {
         new EmbedBuilder()
           .setTitle("🔄 Giveaway Rerolled")
           .setDescription(`🎉 **New Winner:** <@${winner.id}>`)
-          .setColor(0x3498DB)
+          .setColor(0x3498db)
           .setFooter({ text: `Code: ${code}` })
       ]
     });
 
-    interaction.reply({ content: "✅ Rerolled!", ephemeral: true });
+    interaction.reply({ content: "✅ Rerolled successfully.", ephemeral: true });
   }
 });
 
 /* =======================
-   LOGIN
+   LOGIN (USE TOKEN)
 ======================= */
-client.login(process.env.DISCORD_TOKEN);
+client.login(process.env.TOKEN);
