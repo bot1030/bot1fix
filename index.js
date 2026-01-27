@@ -2,7 +2,6 @@ require("dotenv").config();
 const {
   Client,
   GatewayIntentBits,
-  Partials,
   SlashCommandBuilder,
   PermissionFlagsBits,
   EmbedBuilder,
@@ -18,7 +17,7 @@ const client = new Client({
 });
 
 /* =========================
-   MEMORY STORAGE
+   MEMORY
 ========================= */
 let lastGiveaway = null;
 
@@ -41,16 +40,22 @@ const commands = [
     .addRoleOption(o => o.setName("role").setDescription("Required role"))
     .addRoleOption(o => o.setName("ping_role").setDescription("Ping role"))
     .addStringOption(o => o.setName("f").setDescription("F (User ID or 0)")),
+
   new SlashCommandBuilder()
     .setName("reroll")
     .setDescription("Reroll last giveaway")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ];
 
+/* =========================
+   REGISTER
+========================= */
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
-
 (async () => {
-  await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+  await rest.put(
+    Routes.applicationCommands(process.env.CLIENT_ID),
+    { body: commands }
+  );
   console.log("✅ Commands registered");
 })();
 
@@ -78,9 +83,29 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ content: "❌ Missing required role.", ephemeral: true });
     }
 
+    if (lastGiveaway.entries.has(interaction.user.id)) {
+      return interaction.reply({ content: "⚠️ You already joined.", ephemeral: true });
+    }
+
     lastGiveaway.entries.add(interaction.user.id);
 
-    return interaction.reply({ content: "🎉 Entry confirmed!", ephemeral: true });
+    /* UPDATE PARTICIPANT COUNT */
+    const channel = await client.channels.fetch(lastGiveaway.channelId);
+    const msg = await channel.messages.fetch(lastGiveaway.messageId);
+
+    const embed = EmbedBuilder.from(msg.embeds[0]);
+    embed.setFields({
+      name: "👥 Participants",
+      value: `${lastGiveaway.entries.size}`,
+      inline: true,
+    });
+
+    await msg.edit({ embeds: [embed] });
+
+    return interaction.reply({
+      content: "🎉 You entered the giveaway!",
+      ephemeral: true,
+    });
   }
 
   if (!interaction.isChatInputCommand()) return;
@@ -112,7 +137,12 @@ client.on("interactionCreate", async interaction => {
       .setColor(0xffc300)
       .setDescription(
         `**${description}**\n\n🏆 **Prize:** ${prize}\n👥 **Winners:** ${winnersCount}\n⏰ **Ends:** <t:${Math.floor(endTime / 1000)}:R>\n${role ? `🔒 **Role Required:** ${role}` : ""}`
-      );
+      )
+      .addFields({
+        name: "👥 Participants",
+        value: "0",
+        inline: true,
+      });
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -153,7 +183,15 @@ client.on("interactionCreate", async interaction => {
 
       const endEmbed = EmbedBuilder.from(embed)
         .setColor(0x2ecc71)
-        .setDescription(embed.data.description + `\n\n🏆 **Winner(s):** ${winners.join(", ")}`);
+        .addFields({
+          name: "👥 Total Participants",
+          value: `${lastGiveaway.entries.size}`,
+          inline: true,
+        })
+        .setDescription(
+          embed.data.description +
+          `\n\n🏆 **Winner(s):** ${winners.join(", ")}`
+        );
 
       await msg.edit({ embeds: [endEmbed], components: [] });
       await channel.send(`🎉 **GIVEAWAY ENDED!** Congratulations ${winners.join(", ")}`);
@@ -172,7 +210,9 @@ client.on("interactionCreate", async interaction => {
       winners.push(`<@${pool.splice(Math.floor(Math.random() * pool.length), 1)[0]}>`);
     }
 
-    await interaction.reply({ content: `🔄 **New Winner(s):** ${winners.join(", ")}` });
+    await interaction.reply({
+      content: `🔄 **New Winner(s):** ${winners.join(", ")}`,
+    });
   }
 });
 
