@@ -13,6 +13,9 @@ const {
   Routes,
 } = require("discord.js");
 
+/* =========================
+   CLIENT
+========================= */
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -36,6 +39,7 @@ const commands = [
     .setDescription("Create a giveaway (Admin only)")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 
+    // REQUIRED OPTIONS FIRST
     .addChannelOption(o =>
       o.setName("channel").setDescription("Giveaway channel").setRequired(true)
     )
@@ -52,8 +56,7 @@ const commands = [
       o.setName("winners").setDescription("Number of winners").setRequired(true)
     )
 
-    // REQUIRED FIRST ↑↑↑
-
+    // OPTIONAL
     .addIntegerOption(o =>
       o.setName("hours").setDescription("Hours").setRequired(false)
     )
@@ -70,10 +73,7 @@ const commands = [
       o.setName("ping_role").setDescription("Ping role").setRequired(false)
     )
     .addStringOption(o =>
-      o
-        .setName("f")
-        .setDescription("F (User ID or 0)")
-        .setRequired(false)
+      o.setName("f").setDescription("F (User ID or 0)").setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -106,6 +106,37 @@ client.once("ready", () => {
    INTERACTIONS
 ========================= */
 client.on("interactionCreate", async interaction => {
+
+  /* ===== BUTTON: ENTER GIVEAWAY ===== */
+  if (interaction.isButton()) {
+    if (interaction.customId !== "enter_giveaway") return;
+
+    if (!lastGiveaway || lastGiveaway.ended) {
+      return interaction.reply({
+        content: "❌ This giveaway has ended.",
+        ephemeral: true,
+      });
+    }
+
+    const member = interaction.member;
+
+    if (
+      lastGiveaway.requiredRoleId &&
+      !member.roles.cache.has(lastGiveaway.requiredRoleId)
+    ) {
+      return interaction.reply({
+        content: "❌ You do not have the required role to enter this giveaway.",
+        ephemeral: true,
+      });
+    }
+
+    return interaction.reply({
+      content: "🎉 You have successfully entered the giveaway!",
+      ephemeral: true,
+    });
+  }
+
+  /* ===== SLASH COMMANDS ===== */
   if (!interaction.isChatInputCommand()) return;
 
   /* ===== CREATE GIVEAWAY ===== */
@@ -128,22 +159,25 @@ client.on("interactionCreate", async interaction => {
       (hours * 3600 + minutes * 60 + seconds) * 1000;
 
     if (durationMs <= 0) {
-      return interaction.reply({ content: "❌ Invalid duration", ephemeral: true });
+      return interaction.reply({
+        content: "❌ Invalid duration.",
+        ephemeral: true,
+      });
     }
 
     const endTime = Date.now() + durationMs;
 
     const embed = new EmbedBuilder()
       .setTitle(`🎉 ${title}`)
+      .setColor(0xffc300)
       .setDescription(
         `**${description}**\n\n` +
         `🏆 **Prize:** ${prize}\n` +
         `👥 **Winners:** ${winnersCount}\n` +
-        `⏰ **Ends:** <t:${Math.floor(endTime / 1000)}:R>\n\n` +
-        `${requiredRole ? `🔒 **Required Role:** ${requiredRole}\n` : ""}` +
-        `🎉 React with the button below to enter!`
+        `⏰ **Ends:** <t:${Math.floor(endTime / 1000)}:R>\n` +
+        `${requiredRole ? `🔒 **Required Role:** ${requiredRole}\n` : ""}\n` +
+        `🎉 Click the button below to enter!`
       )
-      .setColor(0xffc300)
       .setFooter({ text: "Good luck!" });
 
     const row = new ActionRowBuilder().addComponents(
@@ -157,29 +191,33 @@ client.on("interactionCreate", async interaction => {
       await channel.send({ content: `${pingRole}` });
     }
 
-    const msg = await channel.send({ embeds: [embed], components: [row] });
+    const message = await channel.send({
+      embeds: [embed],
+      components: [row],
+    });
 
     lastGiveaway = {
       channelId: channel.id,
-      messageId: msg.id,
+      messageId: message.id,
       winnersCount,
       requiredRoleId: requiredRole?.id || null,
       fakeWinner,
       ended: false,
     };
 
-    interaction.reply({ content: "✅ Giveaway created!", ephemeral: true });
+    await interaction.reply({
+      content: "✅ Giveaway created!",
+      ephemeral: true,
+    });
 
     setTimeout(async () => {
-      if (lastGiveaway.ended) return;
+      if (!lastGiveaway || lastGiveaway.ended) return;
       lastGiveaway.ended = true;
 
-      const fetched = await channel.messages.fetch(msg.id);
+      const msg = await channel.messages.fetch(message.id);
       const users = new Set();
 
-      fetched.components = [];
-
-      fetched.reactions?.cache?.forEach(r =>
+      msg.reactions?.cache?.forEach(r =>
         r.users.cache.forEach(u => !u.bot && users.add(u.id))
       );
 
@@ -197,24 +235,33 @@ client.on("interactionCreate", async interaction => {
         winners.push(`<@${fakeWinner}>`);
       } else {
         while (winners.length < winnersCount && entries.length > 0) {
-          const pick = entries.splice(Math.floor(Math.random() * entries.length), 1)[0];
+          const pick = entries.splice(
+            Math.floor(Math.random() * entries.length),
+            1
+          )[0];
           winners.push(`<@${pick}>`);
         }
       }
 
       const endEmbed = EmbedBuilder.from(embed)
-        .setDescription(embed.data.description + `\n\n🏆 **Winner(s):** ${winners.join(", ")}`)
-        .setColor(0x2ecc71);
+        .setColor(0x2ecc71)
+        .setDescription(
+          embed.data.description +
+          `\n\n🏆 **Winner(s):** ${winners.join(", ")}`
+        );
 
-      await fetched.edit({ embeds: [endEmbed], components: [] });
+      await msg.edit({ embeds: [endEmbed], components: [] });
       await channel.send(`🎉 **Giveaway Ended!** Congrats ${winners.join(", ")}`);
     }, durationMs);
   }
 
   /* ===== REROLL ===== */
   if (interaction.commandName === "reroll") {
-    if (!lastGiveaway || lastGiveaway.ended === false) {
-      return interaction.reply({ content: "❌ No ended giveaway to reroll", ephemeral: true });
+    if (!lastGiveaway || !lastGiveaway.ended) {
+      return interaction.reply({
+        content: "❌ No finished giveaway to reroll.",
+        ephemeral: true,
+      });
     }
 
     const channel = await client.channels.fetch(lastGiveaway.channelId);
@@ -229,12 +276,15 @@ client.on("interactionCreate", async interaction => {
     let winners = [];
 
     while (winners.length < lastGiveaway.winnersCount && entries.length > 0) {
-      const pick = entries.splice(Math.floor(Math.random() * entries.length), 1)[0];
+      const pick = entries.splice(
+        Math.floor(Math.random() * entries.length),
+        1
+      )[0];
       winners.push(`<@${pick}>`);
     }
 
     await channel.send(`🔄 **Rerolled Winner(s):** ${winners.join(", ")}`);
-    interaction.reply({ content: "✅ Rerolled!", ephemeral: true });
+    await interaction.reply({ content: "✅ Rerolled!", ephemeral: true });
   }
 });
 
