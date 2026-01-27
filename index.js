@@ -13,16 +13,8 @@ const {
   Routes,
 } = require("discord.js");
 
-/* =========================
-   CLIENT
-========================= */
 const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMessageReactions,
-  ],
-  partials: [Partials.Message, Partials.Channel, Partials.Reaction],
+  intents: [GatewayIntentBits.Guilds],
 });
 
 /* =========================
@@ -31,68 +23,35 @@ const client = new Client({
 let lastGiveaway = null;
 
 /* =========================
-   SLASH COMMANDS
+   COMMANDS
 ========================= */
 const commands = [
   new SlashCommandBuilder()
     .setName("create_giveaway")
     .setDescription("Create a giveaway (Admin only)")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-
-    // REQUIRED OPTIONS FIRST
-    .addChannelOption(o =>
-      o.setName("channel").setDescription("Giveaway channel").setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("title").setDescription("Giveaway title").setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("description").setDescription("Giveaway description").setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("prize").setDescription("Prize").setRequired(true)
-    )
-    .addIntegerOption(o =>
-      o.setName("winners").setDescription("Number of winners").setRequired(true)
-    )
-
-    // OPTIONAL
-    .addIntegerOption(o =>
-      o.setName("hours").setDescription("Hours").setRequired(false)
-    )
-    .addIntegerOption(o =>
-      o.setName("minutes").setDescription("Minutes").setRequired(false)
-    )
-    .addIntegerOption(o =>
-      o.setName("seconds").setDescription("Seconds").setRequired(false)
-    )
-    .addRoleOption(o =>
-      o.setName("role").setDescription("Required role").setRequired(false)
-    )
-    .addRoleOption(o =>
-      o.setName("ping_role").setDescription("Ping role").setRequired(false)
-    )
-    .addStringOption(o =>
-      o.setName("f").setDescription("F (User ID or 0)").setRequired(false)
-    ),
-
+    .addChannelOption(o => o.setName("channel").setDescription("Giveaway channel").setRequired(true))
+    .addStringOption(o => o.setName("title").setDescription("Title").setRequired(true))
+    .addStringOption(o => o.setName("description").setDescription("Description").setRequired(true))
+    .addStringOption(o => o.setName("prize").setDescription("Prize").setRequired(true))
+    .addIntegerOption(o => o.setName("winners").setDescription("Winner count").setRequired(true))
+    .addIntegerOption(o => o.setName("hours").setDescription("Hours"))
+    .addIntegerOption(o => o.setName("minutes").setDescription("Minutes"))
+    .addIntegerOption(o => o.setName("seconds").setDescription("Seconds"))
+    .addRoleOption(o => o.setName("role").setDescription("Required role"))
+    .addRoleOption(o => o.setName("ping_role").setDescription("Ping role"))
+    .addStringOption(o => o.setName("f").setDescription("F (User ID or 0)")),
   new SlashCommandBuilder()
     .setName("reroll")
-    .setDescription("Reroll last giveaway (Admin only)")
+    .setDescription("Reroll last giveaway")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ];
 
-/* =========================
-   REGISTER COMMANDS
-========================= */
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
 (async () => {
-  await rest.put(
-    Routes.applicationCommands(process.env.CLIENT_ID),
-    { body: commands }
-  );
-  console.log("✅ Slash commands registered");
+  await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+  console.log("✅ Commands registered");
 })();
 
 /* =========================
@@ -107,39 +66,26 @@ client.once("ready", () => {
 ========================= */
 client.on("interactionCreate", async interaction => {
 
-  /* ===== BUTTON: ENTER GIVEAWAY ===== */
-  if (interaction.isButton()) {
-    if (interaction.customId !== "enter_giveaway") return;
-
-    if (!lastGiveaway || lastGiveaway.ended) {
-      return interaction.reply({
-        content: "❌ This giveaway has ended.",
-        ephemeral: true,
-      });
-    }
-
-    const member = interaction.member;
+  /* ===== BUTTON ===== */
+  if (interaction.isButton() && interaction.customId === "enter_giveaway") {
+    if (!lastGiveaway || lastGiveaway.ended)
+      return interaction.reply({ content: "❌ Giveaway ended.", ephemeral: true });
 
     if (
       lastGiveaway.requiredRoleId &&
-      !member.roles.cache.has(lastGiveaway.requiredRoleId)
+      !interaction.member.roles.cache.has(lastGiveaway.requiredRoleId)
     ) {
-      return interaction.reply({
-        content: "❌ You do not have the required role to enter this giveaway.",
-        ephemeral: true,
-      });
+      return interaction.reply({ content: "❌ Missing required role.", ephemeral: true });
     }
 
-    return interaction.reply({
-      content: "🎉 You have successfully entered the giveaway!",
-      ephemeral: true,
-    });
+    lastGiveaway.entries.add(interaction.user.id);
+
+    return interaction.reply({ content: "🎉 Entry confirmed!", ephemeral: true });
   }
 
-  /* ===== SLASH COMMANDS ===== */
   if (!interaction.isChatInputCommand()) return;
 
-  /* ===== CREATE GIVEAWAY ===== */
+  /* ===== CREATE ===== */
   if (interaction.commandName === "create_giveaway") {
     const channel = interaction.options.getChannel("channel");
     const title = interaction.options.getString("title");
@@ -147,38 +93,26 @@ client.on("interactionCreate", async interaction => {
     const prize = interaction.options.getString("prize");
     const winnersCount = interaction.options.getInteger("winners");
 
-    const hours = interaction.options.getInteger("hours") || 0;
-    const minutes = interaction.options.getInteger("minutes") || 0;
-    const seconds = interaction.options.getInteger("seconds") || 0;
+    const h = interaction.options.getInteger("hours") || 0;
+    const m = interaction.options.getInteger("minutes") || 0;
+    const s = interaction.options.getInteger("seconds") || 0;
 
-    const requiredRole = interaction.options.getRole("role");
+    const role = interaction.options.getRole("role");
     const pingRole = interaction.options.getRole("ping_role");
     const fakeWinner = interaction.options.getString("f") || "0";
 
-    const durationMs =
-      (hours * 3600 + minutes * 60 + seconds) * 1000;
+    const duration = (h * 3600 + m * 60 + s) * 1000;
+    if (duration <= 0)
+      return interaction.reply({ content: "❌ Invalid duration.", ephemeral: true });
 
-    if (durationMs <= 0) {
-      return interaction.reply({
-        content: "❌ Invalid duration.",
-        ephemeral: true,
-      });
-    }
-
-    const endTime = Date.now() + durationMs;
+    const endTime = Date.now() + duration;
 
     const embed = new EmbedBuilder()
       .setTitle(`🎉 ${title}`)
       .setColor(0xffc300)
       .setDescription(
-        `**${description}**\n\n` +
-        `🏆 **Prize:** ${prize}\n` +
-        `👥 **Winners:** ${winnersCount}\n` +
-        `⏰ **Ends:** <t:${Math.floor(endTime / 1000)}:R>\n` +
-        `${requiredRole ? `🔒 **Required Role:** ${requiredRole}\n` : ""}\n` +
-        `🎉 Click the button below to enter!`
-      )
-      .setFooter({ text: "Good luck!" });
+        `**${description}**\n\n🏆 **Prize:** ${prize}\n👥 **Winners:** ${winnersCount}\n⏰ **Ends:** <t:${Math.floor(endTime / 1000)}:R>\n${role ? `🔒 **Role Required:** ${role}` : ""}`
+      );
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -187,104 +121,58 @@ client.on("interactionCreate", async interaction => {
         .setStyle(ButtonStyle.Success)
     );
 
-    if (pingRole) {
-      await channel.send({ content: `${pingRole}` });
-    }
+    if (pingRole) await channel.send({ content: `${pingRole}` });
 
-    const message = await channel.send({
-      embeds: [embed],
-      components: [row],
-    });
+    const msg = await channel.send({ embeds: [embed], components: [row] });
 
     lastGiveaway = {
       channelId: channel.id,
-      messageId: message.id,
+      messageId: msg.id,
       winnersCount,
-      requiredRoleId: requiredRole?.id || null,
+      requiredRoleId: role?.id || null,
       fakeWinner,
+      entries: new Set(),
       ended: false,
     };
 
-    await interaction.reply({
-      content: "✅ Giveaway created!",
-      ephemeral: true,
-    });
+    await interaction.reply({ content: "✅ Giveaway created!", ephemeral: true });
 
     setTimeout(async () => {
-      if (!lastGiveaway || lastGiveaway.ended) return;
       lastGiveaway.ended = true;
 
-      const msg = await channel.messages.fetch(message.id);
-      const users = new Set();
-
-      msg.reactions?.cache?.forEach(r =>
-        r.users.cache.forEach(u => !u.bot && users.add(u.id))
-      );
-
-      let entries = Array.from(users);
-
-      if (requiredRole) {
-        entries = entries.filter(id =>
-          channel.guild.members.cache.get(id)?.roles.cache.has(requiredRole.id)
-        );
-      }
-
+      let pool = Array.from(lastGiveaway.entries);
       let winners = [];
 
       if (fakeWinner !== "0") {
-        winners.push(`<@${fakeWinner}>`);
+        winners = [`<@${fakeWinner}>`];
       } else {
-        while (winners.length < winnersCount && entries.length > 0) {
-          const pick = entries.splice(
-            Math.floor(Math.random() * entries.length),
-            1
-          )[0];
-          winners.push(`<@${pick}>`);
+        while (winners.length < winnersCount && pool.length) {
+          winners.push(`<@${pool.splice(Math.floor(Math.random() * pool.length), 1)[0]}>`);
         }
       }
 
       const endEmbed = EmbedBuilder.from(embed)
         .setColor(0x2ecc71)
-        .setDescription(
-          embed.data.description +
-          `\n\n🏆 **Winner(s):** ${winners.join(", ")}`
-        );
+        .setDescription(embed.data.description + `\n\n🏆 **Winner(s):** ${winners.join(", ")}`);
 
       await msg.edit({ embeds: [endEmbed], components: [] });
-      await channel.send(`🎉 **Giveaway Ended!** Congrats ${winners.join(", ")}`);
-    }, durationMs);
+      await channel.send(`🎉 **GIVEAWAY ENDED!** Congratulations ${winners.join(", ")}`);
+    }, duration);
   }
 
   /* ===== REROLL ===== */
   if (interaction.commandName === "reroll") {
-    if (!lastGiveaway || !lastGiveaway.ended) {
-      return interaction.reply({
-        content: "❌ No finished giveaway to reroll.",
-        ephemeral: true,
-      });
-    }
+    if (!lastGiveaway || !lastGiveaway.ended)
+      return interaction.reply({ content: "❌ No giveaway to reroll.", ephemeral: true });
 
-    const channel = await client.channels.fetch(lastGiveaway.channelId);
-    const msg = await channel.messages.fetch(lastGiveaway.messageId);
-
-    const users = new Set();
-    msg.reactions?.cache?.forEach(r =>
-      r.users.cache.forEach(u => !u.bot && users.add(u.id))
-    );
-
-    let entries = Array.from(users);
+    let pool = Array.from(lastGiveaway.entries);
     let winners = [];
 
-    while (winners.length < lastGiveaway.winnersCount && entries.length > 0) {
-      const pick = entries.splice(
-        Math.floor(Math.random() * entries.length),
-        1
-      )[0];
-      winners.push(`<@${pick}>`);
+    while (winners.length < lastGiveaway.winnersCount && pool.length) {
+      winners.push(`<@${pool.splice(Math.floor(Math.random() * pool.length), 1)[0]}>`);
     }
 
-    await channel.send(`🔄 **Rerolled Winner(s):** ${winners.join(", ")}`);
-    await interaction.reply({ content: "✅ Rerolled!", ephemeral: true });
+    await interaction.reply({ content: `🔄 **New Winner(s):** ${winners.join(", ")}` });
   }
 });
 
