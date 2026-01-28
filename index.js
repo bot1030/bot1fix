@@ -45,6 +45,20 @@ const commands = [
     .setName("reroll")
     .setDescription("Reroll last giveaway")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+
+  /* 🔥 NUKE COMMAND */
+  new SlashCommandBuilder()
+    .setName("nuke")
+    .setDescription("Delete a number of recent messages")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addIntegerOption(o =>
+      o
+        .setName("amount")
+        .setDescription("Number of messages to delete (1–100)")
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(100)
+    ),
 ];
 
 /* =========================
@@ -71,7 +85,7 @@ client.once("ready", () => {
 ========================= */
 client.on("interactionCreate", async interaction => {
 
-  /* ===== BUTTON ===== */
+  /* ===== GIVEAWAY BUTTON ===== */
   if (interaction.isButton() && interaction.customId === "enter_giveaway") {
     if (!lastGiveaway || lastGiveaway.ended)
       return interaction.reply({ content: "❌ Giveaway ended.", ephemeral: true });
@@ -89,7 +103,6 @@ client.on("interactionCreate", async interaction => {
 
     lastGiveaway.entries.add(interaction.user.id);
 
-    /* UPDATE PARTICIPANT COUNT */
     const channel = await client.channels.fetch(lastGiveaway.channelId);
     const msg = await channel.messages.fetch(lastGiveaway.messageId);
 
@@ -110,7 +123,7 @@ client.on("interactionCreate", async interaction => {
 
   if (!interaction.isChatInputCommand()) return;
 
-  /* ===== CREATE ===== */
+  /* ===== CREATE GIVEAWAY ===== */
   if (interaction.commandName === "create_giveaway") {
     const channel = interaction.options.getChannel("channel");
     const title = interaction.options.getString("title");
@@ -213,6 +226,29 @@ client.on("interactionCreate", async interaction => {
     await interaction.reply({
       content: `🔄 **New Winner(s):** ${winners.join(", ")}`,
     });
+  }
+
+  /* ===== NUKE ===== */
+  if (interaction.commandName === "nuke") {
+    const amount = interaction.options.getInteger("amount");
+    const channel = interaction.channel;
+
+    await interaction.reply({
+      content: `💣 Nuking **${amount}** messages...`,
+      ephemeral: true,
+    });
+
+    try {
+      const deleted = await channel.bulkDelete(amount, true);
+      channel.send(`💥 **${deleted.size} messages deleted.**`).then(m =>
+        setTimeout(() => m.delete(), 5000)
+      );
+    } catch (err) {
+      interaction.followUp({
+        content: "❌ Failed to delete messages (older than 14 days?).",
+        ephemeral: true,
+      });
+    }
   }
 });
 
