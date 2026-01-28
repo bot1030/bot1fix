@@ -8,7 +8,6 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  RoleSelectMenuBuilder,
   REST,
   Routes
 } = require("discord.js");
@@ -19,7 +18,7 @@ const client = new Client({
 
 const giveaways = {};
 
-// ---------------- COMMANDS ----------------
+/* ---------------- COMMANDS ---------------- */
 const commands = [
   new SlashCommandBuilder()
     .setName("create_giveaway")
@@ -42,6 +41,12 @@ const commands = [
     .addIntegerOption(o =>
       o.setName("minutes").setDescription("Minutes"))
     .addRoleOption(o =>
+      o.setName("role1").setDescription("Required role 1"))
+    .addRoleOption(o =>
+      o.setName("role2").setDescription("Required role 2"))
+    .addRoleOption(o =>
+      o.setName("role3").setDescription("Required role 3"))
+    .addRoleOption(o =>
       o.setName("ping").setDescription("Ping role"))
     .addStringOption(o =>
       o.setName("lk1").setDescription("0 or number")),
@@ -61,7 +66,7 @@ const commands = [
       o.setName("amount").setDescription("Amount").setRequired(true))
 ].map(c => c.toJSON());
 
-// ---------------- REGISTER ----------------
+/* ---------------- REGISTER ---------------- */
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 (async () => {
   await rest.put(
@@ -70,7 +75,7 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
   );
 })();
 
-// ---------------- HELPERS ----------------
+/* ---------------- HELPERS ---------------- */
 function scheduleEnd(id) {
   const g = giveaways[id];
   const remaining = g.endAt - Date.now();
@@ -109,25 +114,30 @@ async function endGiveaway(id) {
   );
 }
 
-// ---------------- INTERACTIONS ----------------
+/* ---------------- INTERACTIONS ---------------- */
 client.on("interactionCreate", async i => {
 
-  // JOIN BUTTON
+  /* JOIN BUTTON */
   if (i.isButton()) {
     const g = giveaways[i.customId];
     if (!g || g.ended)
       return i.reply({ content: "❌ Giveaway ended.", ephemeral: true });
 
-    if (g.requiredRoles.length &&
-        !g.requiredRoles.every(r => i.member.roles.cache.has(r))) {
-      return i.reply({ content: "❌ Missing required role(s).", ephemeral: true });
+    if (
+      g.requiredRoles.length &&
+      !g.requiredRoles.every(r => i.member.roles.cache.has(r))
+    ) {
+      return i.reply({
+        content: "❌ You do not meet the role requirements.",
+        ephemeral: true
+      });
     }
 
     if (!g.participants.includes(i.user.id)) {
       g.participants.push(i.user.id);
 
       const embed = EmbedBuilder.from(i.message.embeds[0]);
-      embed.spliceFields(2, 1, {
+      embed.spliceFields(3, 1, {
         name: "👥 Participants",
         value: g.participants.length.toString(),
         inline: true
@@ -136,54 +146,91 @@ client.on("interactionCreate", async i => {
       await i.message.edit({ embeds: [embed] });
     }
 
-    return i.reply({ content: "✅ Joined giveaway!", ephemeral: true });
+    return i.reply({ content: "✅ You joined the giveaway!", ephemeral: true });
   }
 
-  // SLASH COMMANDS
   if (!i.isChatInputCommand()) return;
 
+  /* CREATE GIVEAWAY */
   if (i.commandName === "create_giveaway") {
     const id = Date.now().toString();
+
     const days = i.options.getInteger("days") || 0;
     const hours = i.options.getInteger("hours") || 0;
     const minutes = i.options.getInteger("minutes") || 0;
 
+    const roles = [
+      i.options.getRole("role1"),
+      i.options.getRole("role2"),
+      i.options.getRole("role3")
+    ].filter(Boolean).map(r => r.id);
+
+    const roleText = roles.length
+      ? roles.map(r => `<@&${r}>`).join(", ")
+      : "None";
+
+    const embed = new EmbedBuilder()
+      .setColor(0x00ff99)
+      .setTitle(i.options.getString("title"))
+      .setDescription(i.options.getString("description"))
+      .addFields(
+        { name: "🏆 Prize", value: i.options.getString("prize"), inline: true },
+        { name: "🎯 Winners", value: i.options.getInteger("winners").toString(), inline: true },
+        { name: "🔒 Required Roles", value: roleText, inline: false },
+        { name: "👥 Participants", value: "0", inline: true },
+        {
+          name: "⏰ Ends",
+          value: `<t:${Math.floor(
+            (Date.now() + ((days*24+hours)*60+minutes)*60000) / 1000
+          )}:R>`
+        }
+      );
+
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(id)
+        .setLabel("🎉 Join Giveaway")
+        .setStyle(ButtonStyle.Success)
+    );
+
+    const channel = i.options.getChannel("channel");
+    const ping = i.options.getRole("ping");
+
+    const msg = await channel.send({
+      content: ping ? ping.toString() : null,
+      embeds: [embed],
+      components: [row]
+    });
+
     giveaways[id] = {
-      channelId: i.options.getChannel("channel").id,
+      channelId: channel.id,
+      messageId: msg.id,
       prize: i.options.getString("prize"),
       winnerCount: i.options.getInteger("winners"),
-      lk1: i.options.getString("lk1") || "0",
       participants: [],
-      requiredRoles: [],
+      requiredRoles: roles,
+      lk1: i.options.getString("lk1") || "0",
       endAt: Date.now() + ((days*24+hours)*60+minutes)*60000,
       ended: false
     };
 
-    const roleRow = new ActionRowBuilder().addComponents(
-      new RoleSelectMenuBuilder()
-        .setCustomId(`roles_${id}`)
-        .setPlaceholder("Select required roles (optional)")
-        .setMaxValues(5)
-    );
-
-    return i.reply({
-      content: "Select required roles (or skip)",
-      components: [roleRow],
-      ephemeral: true
-    });
+    scheduleEnd(id);
+    return i.reply({ content: `✅ Giveaway created (ID: ${id})`, ephemeral: true });
   }
 
+  /* REROLL */
   if (i.commandName === "reroll") {
     giveaways[i.options.getString("id")].ended = false;
     endGiveaway(i.options.getString("id"));
-    return i.reply({ content: "🔁 Rerolled.", ephemeral: true });
+    return i.reply({ content: "🔁 Giveaway rerolled.", ephemeral: true });
   }
 
+  /* NUKE */
   if (i.commandName === "nuke") {
     const msgs = await i.channel.bulkDelete(i.options.getInteger("amount"), true);
     return i.reply(`💥 Nuked ${msgs.size} messages.`);
   }
 });
 
-// ---------------- LOGIN ----------------
+/* ---------------- LOGIN ---------------- */
 client.login(process.env.TOKEN);
