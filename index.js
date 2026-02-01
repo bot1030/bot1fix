@@ -30,79 +30,46 @@ const commands = [
   new SlashCommandBuilder()
     .setName("giveaway")
     .setDescription("Create a giveaway")
-    .addStringOption(o =>
-      o.setName("title").setDescription("Giveaway title").setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("description").setDescription("Giveaway description").setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("prize").setDescription("Prize").setRequired(true)
-    )
-    .addIntegerOption(o =>
-      o.setName("winners").setDescription("Number of winners").setRequired(true)
-    )
-    .addIntegerOption(o =>
-      o.setName("days").setDescription("Days (0 or number)")
-    )
-    .addIntegerOption(o =>
-      o.setName("hours").setDescription("Hours (0 or number)")
-    )
-    .addIntegerOption(o =>
-      o.setName("minutes").setDescription("Minutes (0 or number)")
-    )
-    .addRoleOption(o =>
-      o.setName("role1").setDescription("Required role 1")
-    )
-    .addRoleOption(o =>
-      o.setName("role2").setDescription("Required role 2")
-    )
-    .addRoleOption(o =>
-      o.setName("role3").setDescription("Required role 3")
-    )
-    .addRoleOption(o =>
-      o.setName("pingrole").setDescription("Role to ping")
-    )
-    .addStringOption(o =>
-      o.setName("fln").setDescription("0 or number")
-    ),
+    .addStringOption(o => o.setName("title").setDescription("Title").setRequired(true))
+    .addStringOption(o => o.setName("description").setDescription("Description").setRequired(true))
+    .addStringOption(o => o.setName("prize").setDescription("Prize").setRequired(true))
+    .addIntegerOption(o => o.setName("winners").setDescription("Winner count").setRequired(true))
+    .addIntegerOption(o => o.setName("days").setDescription("Days (0 or blank)"))
+    .addIntegerOption(o => o.setName("hours").setDescription("Hours (0 or blank)"))
+    .addIntegerOption(o => o.setName("minutes").setDescription("Minutes (0 or blank)"))
+    .addRoleOption(o => o.setName("role1").setDescription("Required role 1"))
+    .addRoleOption(o => o.setName("role2").setDescription("Required role 2"))
+    .addRoleOption(o => o.setName("role3").setDescription("Required role 3"))
+    .addRoleOption(o => o.setName("pingrole").setDescription("Ping role"))
+    .addStringOption(o => o.setName("fln").setDescription("0 or number")),
 
   new SlashCommandBuilder()
     .setName("reroll")
-    .setDescription("Reroll a giveaway")
-    .addStringOption(o =>
-      o.setName("messageid").setDescription("Giveaway message ID").setRequired(true)
-    ),
+    .setDescription("Reroll giveaway")
+    .addStringOption(o => o.setName("messageid").setDescription("Giveaway message ID").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("end")
-    .setDescription("Force end a giveaway")
-    .addStringOption(o =>
-      o.setName("messageid").setDescription("Giveaway message ID").setRequired(true)
-    ),
+    .setDescription("Force end giveaway")
+    .addStringOption(o => o.setName("messageid").setDescription("Giveaway message ID").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("nuke")
     .setDescription("Delete messages")
-    .addIntegerOption(o =>
-      o.setName("amount").setDescription("Number of messages").setRequired(true)
-    )
+    .addIntegerOption(o => o.setName("amount").setDescription("Amount").setRequired(true))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
 client.once("ready", async () => {
-  await rest.put(
-    Routes.applicationCommands(client.user.id),
-    { body: commands }
-  );
+  await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
   console.log("✅ Bot online");
 });
 
 /* ---------------- INTERACTIONS ---------------- */
 
 client.on("interactionCreate", async interaction => {
-  /* ---------- SLASH COMMANDS ---------- */
+
   if (interaction.isChatInputCommand()) {
 
     /* ---- GIVEAWAY ---- */
@@ -116,22 +83,21 @@ client.on("interactionCreate", async interaction => {
       const hours = interaction.options.getInteger("hours") || 0;
       const minutes = interaction.options.getInteger("minutes") || 0;
 
-      const role1 = interaction.options.getRole("role1");
-      const role2 = interaction.options.getRole("role2");
-      const role3 = interaction.options.getRole("role3");
-      const pingRole = interaction.options.getRole("pingrole");
-
-      const flnRaw = interaction.options.getString("fln") || "0";
-      const fln = flnRaw === "0" ? null : flnRaw;
-
-      const duration =
-        ((days * 24 + hours) * 60 + minutes) * 60 * 1000;
-
-      if (duration <= 0)
+      const durationMs = (((days * 24 + hours) * 60) + minutes) * 60 * 1000;
+      if (durationMs <= 0)
         return interaction.reply({ content: "❌ Invalid duration", ephemeral: true });
 
-      const endAt = Date.now() + duration;
-      const reqRoles = [role1, role2, role3].filter(Boolean);
+      const endAt = Date.now() + durationMs;
+
+      const reqRoles = [
+        interaction.options.getRole("role1"),
+        interaction.options.getRole("role2"),
+        interaction.options.getRole("role3")
+      ].filter(Boolean);
+
+      const pingRole = interaction.options.getRole("pingrole");
+      const flnRaw = interaction.options.getString("fln") || "0";
+      const fln = flnRaw === "0" ? null : flnRaw;
 
       const embed = new EmbedBuilder()
         .setTitle(`🎁 ${title}`)
@@ -139,12 +105,8 @@ client.on("interactionCreate", async interaction => {
         .setDescription(
           `${desc}\n\n` +
           `🏆 **Prize:** ${prize}\n` +
-          `👥 **Winners:** ${winners}\n\n` +
-          `🔒 **Requirements:** ${
-            reqRoles.length
-              ? reqRoles.map(r => `<@&${r.id}>`).join(", ")
-              : "None"
-          }\n\n` +
+          `👥 **Winners:** ${winners}\n` +
+          `🔒 **Requirements:** ${reqRoles.length ? reqRoles.map(r => `<@&${r.id}>`).join(", ") : "None"}\n\n` +
           `👤 **Participants:** 0\n\n` +
           `⏰ Ends <t:${Math.floor(endAt / 1000)}:R>`
         );
@@ -163,43 +125,47 @@ client.on("interactionCreate", async interaction => {
       });
 
       giveaways.set(msg.id, {
+        channelId: msg.channel.id,
         prize,
-        winners,
         endAt,
         users: new Set(),
         reqRoles,
+        fln,
         ended: false,
-        channelId: msg.channel.id,
-        fln
+        baseEmbed: embed
       });
 
       interaction.reply({ content: "✅ Giveaway created", ephemeral: true });
     }
 
-    /* ---- REROLL ---- */
+    /* ---- REROLL (PUBLIC) ---- */
     if (interaction.commandName === "reroll") {
-      const id = interaction.options.getString("messageid");
-      const g = giveaways.get(id);
+      const g = giveaways.get(interaction.options.getString("messageid"));
       if (!g) return interaction.reply({ content: "❌ Giveaway not found", ephemeral: true });
 
       const pool = [...g.users];
       if (!pool.length)
         return interaction.reply({ content: "❌ No participants", ephemeral: true });
 
-      const winner = g.fln ? g.fln : pool[Math.floor(Math.random() * pool.length)];
-      interaction.channel.send(`🎉 Congratulations <@${winner}>! You won **${g.prize}**`);
-      interaction.reply({ content: "✅ Rerolled", ephemeral: true });
+      const winner = g.fln ?? pool[Math.floor(Math.random() * pool.length)];
+
+      await interaction.channel.send(
+        `🔁 ${interaction.user} **rerolled the giveaway winner!**\n🎉 Congratulations <@${winner}>! You won **${g.prize}**`
+      );
+
+      interaction.reply({ content: "Rerolled", ephemeral: true });
     }
 
-    /* ---- FORCE END ---- */
+    /* ---- FORCE END (PUBLIC) ---- */
     if (interaction.commandName === "end") {
       const id = interaction.options.getString("messageid");
       const g = giveaways.get(id);
       if (!g || g.ended)
         return interaction.reply({ content: "❌ Invalid giveaway", ephemeral: true });
 
-      endGiveaway(id, g);
-      interaction.reply({ content: "✅ Giveaway ended", ephemeral: true });
+      await endGiveaway(id, g);
+      await interaction.channel.send(`🛑 ${interaction.user} **has force-ended this giveaway.**`);
+      interaction.reply({ content: "Ended", ephemeral: true });
     }
 
     /* ---- NUKE ---- */
@@ -214,36 +180,34 @@ client.on("interactionCreate", async interaction => {
     }
   }
 
-  /* ---------- JOIN BUTTON ---------- */
+  /* ---- JOIN BUTTON ---- */
   if (interaction.isButton() && interaction.customId === "join_gw") {
     const g = giveaways.get(interaction.message.id);
     if (!g || g.ended)
       return interaction.reply({ content: "❌ Giveaway ended", ephemeral: true });
 
     if (g.reqRoles.length) {
-      const hasRole = g.reqRoles.some(r =>
-        interaction.member.roles.cache.has(r.id)
-      );
-      if (!hasRole)
+      const ok = g.reqRoles.some(r => interaction.member.roles.cache.has(r.id));
+      if (!ok)
         return interaction.reply({ content: "❌ You don't meet requirements", ephemeral: true });
     }
 
     g.users.add(interaction.user.id);
 
-    const embed = EmbedBuilder.from(interaction.message.embeds[0]);
-    embed.setDescription(
-      embed.data.description.replace(
-        /Participants:\s*\d+/,
-        `Participants: ${g.users.size}`
-      )
-    );
+    const updated = EmbedBuilder.from(g.baseEmbed)
+      .setDescription(
+        g.baseEmbed.data.description.replace(
+          "👤 **Participants:** 0",
+          `👤 **Participants:** ${g.users.size}`
+        )
+      );
 
-    await interaction.message.edit({ embeds: [embed] });
+    await interaction.message.edit({ embeds: [updated] });
     interaction.reply({ content: "✅ Joined giveaway", ephemeral: true });
   }
 });
 
-/* ---------------- END HANDLER ---------------- */
+/* ---------------- END LOGIC ---------------- */
 
 async function endGiveaway(id, g) {
   if (g.ended) return;
@@ -252,15 +216,18 @@ async function endGiveaway(id, g) {
   const channel = await client.channels.fetch(g.channelId);
   const message = await channel.messages.fetch(id);
 
-  const pool = [...g.users];
-  if (pool.length) {
-    const winner = g.fln ? g.fln : pool[Math.floor(Math.random() * pool.length)];
+  const embed = EmbedBuilder.from(message.embeds[0]);
+  embed.setDescription(embed.data.description.replace(/⏰ Ends.*$/m, "🛑 **Already ended**"));
+
+  await message.edit({ embeds: [embed], components: [] });
+
+  if (g.users.size) {
+    const pool = [...g.users];
+    const winner = g.fln ?? pool[Math.floor(Math.random() * pool.length)];
     channel.send(`🎉 Congratulations <@${winner}>! You won **${g.prize}**`);
   } else {
     channel.send("❌ Giveaway ended with no participants");
   }
-
-  message.edit({ components: [] });
 }
 
 /* ---------------- AUTO CHECK ---------------- */
