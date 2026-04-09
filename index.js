@@ -37,6 +37,12 @@ function saveData(data) {
 let giveaways = loadData();
 const joinLocks = new Set();
 
+function noPerm(interaction) {
+  return interaction.reply({
+    content: `${interaction.user} you doesn't have permission to use this command`
+  });
+}
+
 /* ---------------- SLASH COMMANDS ---------------- */
 
 const commands = [
@@ -73,7 +79,16 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("done")
-    .setDescription("Send completed delivery message")
+    .setDescription("Send completed delivery message"),
+
+  new SlashCommandBuilder()
+    .setName("delete")
+    .setDescription("Delete messages")
+    .addIntegerOption(o =>
+      o.setName("amount")
+        .setDescription("Number of messages to delete")
+        .setRequired(true)
+    )
 
 ].map(c => c.toJSON());
 
@@ -89,11 +104,14 @@ client.once("ready", async () => {
 
 client.on("interactionCreate", async interaction => {
 
-  /* ---------- CREATE GIVEAWAY ---------- */
-
   if (interaction.isChatInputCommand()) {
 
+    /* ---------- CREATE GIVEAWAY ---------- */
+
     if (interaction.commandName === "giveaway") {
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
+        return noPerm(interaction);
 
       const duration =
         (((interaction.options.getInteger("days") || 0) * 24 +
@@ -160,6 +178,10 @@ client.on("interactionCreate", async interaction => {
     /* ---------- END ---------- */
 
     if (interaction.commandName === "end") {
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
+        return noPerm(interaction);
+
       await endGiveaway(interaction.options.getString("messageid"), interaction.user);
       return interaction.reply({ content: "Giveaway ended.", ephemeral: true });
     }
@@ -167,6 +189,10 @@ client.on("interactionCreate", async interaction => {
     /* ---------- REROLL ---------- */
 
     if (interaction.commandName === "reroll") {
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
+        return noPerm(interaction);
+
       const id = interaction.options.getString("messageid");
       const g = giveaways[id];
       if (!g || !g.users.length)
@@ -183,8 +209,9 @@ client.on("interactionCreate", async interaction => {
     /* ---------- NUKE ---------- */
 
     if (interaction.commandName === "nuke") {
+
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
-        return interaction.reply({ content: "No permission.", ephemeral: true });
+        return noPerm(interaction);
 
       const channel = interaction.channel;
       const newChannel = await channel.clone();
@@ -196,6 +223,10 @@ client.on("interactionCreate", async interaction => {
     /* ---------- DONE ---------- */
 
     if (interaction.commandName === "done") {
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
+        return noPerm(interaction);
+
       return interaction.reply({
         content:
 `✅ 【出貨完成通知】
@@ -210,9 +241,30 @@ client.on("interactionCreate", async interaction => {
 （方便的話麻煩幫我們JK商城發誠文）`
       });
     }
+
+    /* ---------- DELETE ---------- */
+
+    if (interaction.commandName === "delete") {
+
+      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
+        return noPerm(interaction);
+
+      const amount = interaction.options.getInteger("amount");
+
+      if (amount < 1 || amount > 100)
+        return interaction.reply({
+          content: "Amount must be between 1 and 100"
+        });
+
+      await interaction.channel.bulkDelete(amount, true);
+
+      interaction.reply({
+        content: `🧹 Deleted ${amount} messages`
+      });
+    }
   }
 
-  /* ---------- JOIN BUTTON (ANTI SPAM SAFE) ---------- */
+  /* ---------- JOIN BUTTON ---------- */
 
   if (interaction.isButton() && interaction.customId === "join") {
 
