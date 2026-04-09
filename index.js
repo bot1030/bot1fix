@@ -106,10 +106,17 @@ client.on("interactionCreate", async interaction => {
 
   if (interaction.isChatInputCommand()) {
 
+    /* ---------- CREATE GIVEAWAY ---------- */
+
     if (interaction.commandName === "giveaway") {
 
-      if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
-        return noPerm(interaction);
+      const allowedUsers = [
+        "786683877107302461",
+        "473647287026057227"
+      ];
+
+      if (!allowedUsers.includes(interaction.user.id))
+        return interaction.reply({ content: "you do not have permission to use this command" });
 
       const duration =
         (((interaction.options.getInteger("days") || 0) * 24 +
@@ -173,6 +180,8 @@ client.on("interactionCreate", async interaction => {
       interaction.reply({ content: "✅ Giveaway created!", ephemeral: true });
     }
 
+    /* ---------- END ---------- */
+
     if (interaction.commandName === "end") {
 
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.Administrator))
@@ -181,6 +190,8 @@ client.on("interactionCreate", async interaction => {
       await endGiveaway(interaction.options.getString("messageid"), interaction.user);
       return interaction.reply({ content: "Giveaway ended.", ephemeral: true });
     }
+
+    /* ---------- REROLL ---------- */
 
     if (interaction.commandName === "reroll") {
 
@@ -200,6 +211,8 @@ client.on("interactionCreate", async interaction => {
       return interaction.reply({ content: "Rerolled.", ephemeral: true });
     }
 
+    /* ---------- NUKE ---------- */
+
     if (interaction.commandName === "nuke") {
 
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
@@ -211,6 +224,8 @@ client.on("interactionCreate", async interaction => {
 
       return newChannel.send("💣 Channel nuked.");
     }
+
+    /* ---------- DONE ---------- */
 
     if (interaction.commandName === "done") {
 
@@ -232,6 +247,8 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
+    /* ---------- DELETE ---------- */
+
     if (interaction.commandName === "delete") {
 
       if (!interaction.member.permissions.has(PermissionsBitField.Flags.ManageChannels))
@@ -251,6 +268,8 @@ client.on("interactionCreate", async interaction => {
       });
     }
   }
+
+  /* ---------- JOIN BUTTON ---------- */
 
   if (interaction.isButton() && interaction.customId === "join") {
 
@@ -297,6 +316,8 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
+/* ---------------- END FUNCTION ---------------- */
+
 async function endGiveaway(id, endedBy = null) {
   const g = giveaways[id];
   if (!g || g.ended) return;
@@ -322,6 +343,8 @@ async function endGiveaway(id, endedBy = null) {
   if (endedBy)
     channel.send(`🛑 ${endedBy} ended the giveaway.`);
 }
+
+/* ---------------- AUTO CHECK ---------------- */
 
 function checkGiveaways() {
   for (const id in giveaways) {
