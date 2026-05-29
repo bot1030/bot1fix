@@ -274,7 +274,7 @@ async function finishGiveaway(messageId) {
 
   await channel.send(
     winnerIds.length > 0
-      ? `🎊 **Winner(s):** ${winnersText}`
+      ? `🎊 Congratulations ${winnersText}, you won **${gw.prize}**!`
       : "❌ No valid participants."
   );
 
@@ -760,7 +760,7 @@ client.on("interactionCreate", async interaction => {
       }).catch(() => null);
     }
 
-    await channel.send(`🔁 **Rerolled Winner(s):** ${winnersText}`);
+    await channel.send(`🔁 Congratulations ${winnersText}, you won **${gw.prize}**!`);
 
     return interaction.editReply("✅ Giveaway rerolled.");
   }
