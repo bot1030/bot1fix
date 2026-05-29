@@ -43,6 +43,22 @@ function extractUserId(input) {
     .trim();
 }
 
+function getLuckRolesText() {
+  if (luckRoles.size === 0) {
+    return "No luck roles configured.";
+  }
+
+  const text = [...luckRoles.entries()]
+    .map(([roleId, multiplier]) => `<@&${roleId}> has x${multiplier}`)
+    .join("\n");
+
+  if (text.length > 1024) {
+    return text.slice(0, 1000) + "\n...more luck roles";
+  }
+
+  return text;
+}
+
 async function pickWeightedWinner(validUsers, guild) {
   const entries = [];
 
@@ -331,6 +347,10 @@ client.on("interactionCreate", async interaction => {
       {
         name: "⏰ Ends",
         value: `<t:${Math.floor((Date.now() + durationMs) / 1000)}:R>`
+      },
+      {
+        name: "🍀 Luck Roles",
+        value: getLuckRolesText()
       }
     )
     .setColor("Gold")
