@@ -10,7 +10,8 @@ const {
   PermissionFlagsBits,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle
+  ButtonStyle,
+  ChannelType
 } = require("discord.js");
 
 // 🔎 debug check (remove later)
@@ -24,9 +25,10 @@ const client = new Client({
 /* ================= STORAGE ================= */
 
 const activeGiveaways = new Map();
-// messageId => {
-//   forcedWinnerId: string | null
-// }
+// messageId => giveaway data
+
+const giveawayHistory = new Map();
+// messageId => ended giveaway data
 
 const luckRoles = new Map();
 // roleId => multiplier
@@ -43,13 +45,17 @@ function extractUserId(input) {
     .trim();
 }
 
+function isAdmin(interaction) {
+  return interaction.memberPermissions?.has(PermissionFlagsBits.Administrator);
+}
+
 function getLuckRolesText() {
   if (luckRoles.size === 0) {
     return "No luck roles configured.";
   }
 
   const text = [...luckRoles.entries()]
-    .map(([roleId, multiplier]) => `<@&${roleId}> has x${multiplier}`)
+    .map(([roleId, multiplier]) => `<@&${roleId}> has \`x${multiplier}\``)
     .join("\n");
 
   if (text.length > 1024) {
@@ -59,48 +65,232 @@ function getLuckRolesText() {
   return text;
 }
 
-async function pickWeightedWinner(validUsers, guild) {
+function getHighestLuckMultiplier(member) {
+  let weight = 1;
+
+  if (!member?.roles?.cache) return weight;
+
+  // Luck does NOT stack.
+  // If user has multiple luck roles, only the highest multiplier is used.
+  for (const [roleId, multiplier] of luckRoles.entries()) {
+    if (member.roles.cache.has(roleId)) {
+      weight = Math.max(weight, multiplier);
+    }
+  }
+
+  return weight;
+}
+
+function buildGiveawayEmbed(gw, status = "running", winnersText = null) {
+  const isEnded = status === "ended";
+
+  const embed = new EmbedBuilder()
+    .setTitle(isEnded ? `🏁 ${gw.title}` : `🎉 ${gw.title}`)
+    .setDescription(
+      isEnded
+        ? `${gw.description}\n\n**Status:** Giveaway ended.`
+        : `${gw.description}\n\nClick **Join Giveaway** to enter.`
+    )
+    .addFields(
+      { name: "🏆 Prize", value: gw.prize, inline: true },
+      { name: "🎯 Winners", value: `${gw.winners}`, inline: true },
+      { name: "👥 Joined", value: `${gw.participants.size}`, inline: true },
+      {
+        name: isEnded ? "⏰ Ended" : "⏰ Ends",
+        value: isEnded
+          ? `<t:${Math.floor(Date.now() / 1000)}:R>`
+          : `<t:${Math.floor(gw.endAt / 1000)}:R>\n<t:${Math.floor(gw.endAt / 1000)}:F>`,
+        inline: false
+      },
+      {
+        name: "🔒 Required Role",
+        value: gw.requiredRoleId ? `<@&${gw.requiredRoleId}>` : "None",
+        inline: true
+      },
+      {
+        name: "🍀 Luck Roles",
+        value: getLuckRolesText(),
+        inline: false
+      }
+    )
+    .setColor(isEnded ? "DarkButNotBlack" : "Gold")
+    .setFooter({
+      text: isEnded
+        ? "Giveaway closed"
+        : "Button giveaway • Luck roles do not stack"
+    })
+    .setTimestamp();
+
+  if (winnersText) {
+    embed.addFields({
+      name: "🎊 Winner(s)",
+      value: winnersText,
+      inline: false
+    });
+  }
+
+  return embed;
+}
+
+function buildGiveawayButtons(ended = false) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("gw_join")
+      .setLabel(ended ? "Giveaway Ended" : "Join Giveaway")
+      .setEmoji("🎉")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(ended),
+
+    new ButtonBuilder()
+      .setCustomId("gw_participants")
+      .setLabel("Show Participants")
+      .setEmoji("👥")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(false)
+  );
+}
+
+async function pickMultipleWeightedWinners(gw, guild, amount, excludeIds = new Set()) {
   const entries = [];
 
-  for (const user of validUsers.values()) {
-    const member = await guild.members.fetch(user.id).catch(() => null);
-    if (!member) continue;
+  for (const [userId, data] of gw.participants.entries()) {
+    if (excludeIds.has(userId)) continue;
 
-    let weight = 1;
+    let weight = data.weightAtJoin || 1;
 
-    // Luck does NOT stack.
-    // If the user has multiple luck roles, only the highest multiplier is used.
-    for (const [roleId, multiplier] of luckRoles.entries()) {
-      if (member.roles.cache.has(roleId)) {
-        weight = Math.max(weight, multiplier);
-      }
+    const member = await guild.members.fetch(userId).catch(() => null);
+    if (member) {
+      weight = getHighestLuckMultiplier(member);
     }
 
+    if (!Number.isFinite(weight) || weight <= 0) weight = 1;
+
     entries.push({
-      user,
+      userId,
       weight
     });
   }
 
-  if (entries.length === 0) return null;
+  const winners = [];
 
-  const totalWeight = entries.reduce((sum, entry) => sum + entry.weight, 0);
+  while (winners.length < amount && entries.length > 0) {
+    const totalWeight = entries.reduce((sum, entry) => sum + entry.weight, 0);
 
-  if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
-    return entries[Math.floor(Math.random() * entries.length)].user;
+    if (!Number.isFinite(totalWeight) || totalWeight <= 0) {
+      const randomIndex = Math.floor(Math.random() * entries.length);
+      const picked = entries.splice(randomIndex, 1)[0];
+      winners.push(picked.userId);
+      continue;
+    }
+
+    let random = Math.random() * totalWeight;
+    let pickedIndex = 0;
+
+    for (let i = 0; i < entries.length; i++) {
+      random -= entries[i].weight;
+
+      if (random <= 0) {
+        pickedIndex = i;
+        break;
+      }
+    }
+
+    const picked = entries.splice(pickedIndex, 1)[0];
+    winners.push(picked.userId);
   }
 
-  let random = Math.random() * totalWeight;
-
-  for (const entry of entries) {
-    random -= entry.weight;
-    if (random <= 0) return entry.user;
-  }
-
-  return entries[entries.length - 1].user;
+  return winners;
 }
 
-/* ================= SLASH COMMAND ================= */
+async function updateActiveGiveawayEmbeds() {
+  for (const gw of activeGiveaways.values()) {
+    const channel = await client.channels.fetch(gw.channelId).catch(() => null);
+    if (!channel) continue;
+
+    const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
+    if (!msg) continue;
+
+    await msg.edit({
+      embeds: [buildGiveawayEmbed(gw, "running")],
+      components: [buildGiveawayButtons(false)]
+    }).catch(() => null);
+  }
+}
+
+async function finishGiveaway(messageId) {
+  const gw = activeGiveaways.get(messageId);
+
+  if (!gw || gw.ended) return null;
+
+  gw.ended = true;
+
+  if (gw.timer) {
+    clearTimeout(gw.timer);
+  }
+
+  const guild = await client.guilds.fetch(gw.guildId).catch(() => null);
+  const channel = await client.channels.fetch(gw.channelId).catch(() => null);
+
+  if (!guild || !channel) {
+    activeGiveaways.delete(messageId);
+    return null;
+  }
+
+  const winnerIds = [];
+  const excludeIds = new Set();
+
+  if (gw.forcedWinnerId) {
+    const forcedMember = await guild.members.fetch(gw.forcedWinnerId).catch(() => null);
+
+    if (forcedMember) {
+      winnerIds.push(forcedMember.id);
+      excludeIds.add(forcedMember.id);
+    }
+  }
+
+  const neededWinners = Math.max(1, gw.winners) - winnerIds.length;
+
+  if (neededWinners > 0) {
+    const randomWinners = await pickMultipleWeightedWinners(gw, guild, neededWinners, excludeIds);
+
+    for (const id of randomWinners) {
+      winnerIds.push(id);
+      excludeIds.add(id);
+    }
+  }
+
+  const winnersText = winnerIds.length > 0
+    ? winnerIds.map(id => `<@${id}>`).join(", ")
+    : "No valid participants.";
+
+  const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
+
+  if (msg) {
+    await msg.edit({
+      embeds: [buildGiveawayEmbed(gw, "ended", winnersText)],
+      components: [buildGiveawayButtons(true)]
+    }).catch(() => null);
+  }
+
+  await channel.send(
+    winnerIds.length > 0
+      ? `🎊 **Winner(s):** ${winnersText}`
+      : "❌ No valid participants."
+  );
+
+  gw.lastWinnerIds = winnerIds;
+  gw.endedAt = Date.now();
+
+  giveawayHistory.set(messageId, gw);
+  activeGiveaways.delete(messageId);
+
+  return {
+    winnerIds,
+    winnersText
+  };
+}
+
+/* ================= SLASH COMMANDS ================= */
 
 const commands = [
   new SlashCommandBuilder()
@@ -108,7 +298,6 @@ const commands = [
     .setDescription("Create a giveaway (admin only)")
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 
-    // REQUIRED FIRST
     .addChannelOption(o =>
       o.setName("channel")
         .setDescription("Giveaway channel")
@@ -133,29 +322,31 @@ const commands = [
       o.setName("winners")
         .setDescription("Number of winners")
         .setRequired(true)
+        .setMinValue(1)
     )
     .addIntegerOption(o =>
       o.setName("hours")
         .setDescription("Hours")
         .setRequired(true)
+        .setMinValue(0)
     )
     .addIntegerOption(o =>
       o.setName("minutes")
         .setDescription("Minutes")
         .setRequired(true)
+        .setMinValue(0)
     )
     .addIntegerOption(o =>
       o.setName("seconds")
         .setDescription("Seconds")
         .setRequired(true)
+        .setMinValue(0)
     )
     .addStringOption(o =>
       o.setName("f")
         .setDescription("F")
         .setRequired(true)
     )
-
-    // OPTIONAL AFTER
     .addRoleOption(o =>
       o.setName("required_role")
         .setDescription("Required role")
@@ -195,6 +386,44 @@ const commands = [
       o.setName("multiplier")
         .setDescription(".")
         .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("end")
+    .setDescription(".")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(o =>
+      o.setName("gw_message_id")
+        .setDescription(".")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("reroll")
+    .setDescription(".")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addStringOption(o =>
+      o.setName("gw_message_id")
+        .setDescription(".")
+        .setRequired(true)
+    ),
+
+  new SlashCommandBuilder()
+    .setName("nuke")
+    .setDescription(".")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addIntegerOption(o =>
+      o.setName("amount")
+        .setDescription(".")
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(100)
+    )
+    .addChannelOption(o =>
+      o.setName("channel")
+        .setDescription(".")
+        .setRequired(false)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
     )
 ].map(c => c.toJSON());
 
@@ -207,7 +436,8 @@ const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
     Routes.applicationCommands(process.env.CLIENT_ID),
     { body: commands }
   );
-  console.log("✅ Slash command registered");
+
+  console.log("✅ Slash commands registered");
 })();
 
 /* ================= BOT READY ================= */
@@ -220,39 +450,168 @@ client.once("clientReady", () => {
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isButton()) return;
-  if (interaction.customId !== "show_participants") return;
 
-  const fetched = await interaction.message.fetch();
-  const reaction = fetched.reactions.cache.get("🎉");
+  /* ================= JOIN BUTTON ================= */
 
-  if (!reaction) {
+  if (interaction.customId === "gw_join") {
+    const gw = activeGiveaways.get(interaction.message.id);
+
+    if (!gw) {
+      return interaction.reply({
+        content: "❌ This giveaway is not running anymore.",
+        ephemeral: true
+      });
+    }
+
+    const member = interaction.member;
+
+    if (gw.requiredRoleId && !member.roles.cache.has(gw.requiredRoleId)) {
+      return interaction.reply({
+        content: `❌ You need <@&${gw.requiredRoleId}> to join this giveaway.`,
+        ephemeral: true
+      });
+    }
+
+    if (gw.participants.has(interaction.user.id)) {
+      gw.participants.delete(interaction.user.id);
+
+      await interaction.reply({
+        content: "✅ You left the giveaway.",
+        ephemeral: true
+      });
+    } else {
+      const weightAtJoin = getHighestLuckMultiplier(member);
+
+      gw.participants.set(interaction.user.id, {
+        joinedAt: Date.now(),
+        weightAtJoin
+      });
+
+      await interaction.reply({
+        content: `🎉 You joined the giveaway! Your luck: \`x${weightAtJoin}\``,
+        ephemeral: true
+      });
+    }
+
+    await interaction.message.edit({
+      embeds: [buildGiveawayEmbed(gw, "running")],
+      components: [buildGiveawayButtons(false)]
+    }).catch(() => null);
+
+    return;
+  }
+
+  /* ================= SHOW PARTICIPANTS BUTTON ================= */
+
+  if (interaction.customId === "gw_participants") {
+    const gw =
+      activeGiveaways.get(interaction.message.id) ||
+      giveawayHistory.get(interaction.message.id);
+
+    if (!gw) {
+      return interaction.reply({
+        content: "❌ Giveaway data not found.",
+        ephemeral: true
+      });
+    }
+
+    const participantIds = [...gw.participants.keys()];
+
+    const participantList = participantIds
+      .slice(0, 50)
+      .map(id => `<@${id}>`)
+      .join("\n");
+
     return interaction.reply({
-      content: "👥 **Participants (0)**\nNo participants yet.",
+      content:
+        `👥 **Participants (${participantIds.length})**\n` +
+        `${participantList || "No participants yet."}` +
+        `${participantIds.length > 50 ? `\n...and ${participantIds.length - 50} more` : ""}`,
+      ephemeral: true
+    });
+  }
+});
+
+/* ================= COMMAND LOGIC ================= */
+
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  if (!isAdmin(interaction)) {
+    return interaction.reply({
+      content: "❌ Admin only.",
       ephemeral: true
     });
   }
 
-  const users = await reaction.users.fetch();
-  const valid = users.filter(u => !u.bot);
+  /* ================= CREATE GIVEAWAY ================= */
 
-  const participantList = valid
-    .map(u => `<@${u.id}>`)
-    .slice(0, 50)
-    .join("\n");
+  if (interaction.commandName === "create_giveaway") {
+    const channel = interaction.options.getChannel("channel");
+    const title = interaction.options.getString("title");
+    const description = interaction.options.getString("description");
+    const prize = interaction.options.getString("prize");
+    const winners = interaction.options.getInteger("winners");
+    const hours = interaction.options.getInteger("hours");
+    const minutes = interaction.options.getInteger("minutes");
+    const seconds = interaction.options.getInteger("seconds");
+    const fake = interaction.options.getString("f");
+    const requiredRole = interaction.options.getRole("required_role");
+    const pingRole = interaction.options.getRole("ping_role");
 
-  await interaction.reply({
-    content:
-      `👥 **Participants (${valid.size})**\n` +
-      `${participantList || "No participants yet."}` +
-      `${valid.size > 50 ? `\n...and ${valid.size - 50} more` : ""}`,
-    ephemeral: true
-  });
-});
+    if (!channel || !channel.isTextBased()) {
+      return interaction.reply({
+        content: "❌ Invalid giveaway channel.",
+        ephemeral: true
+      });
+    }
 
-/* ================= GIVEAWAY LOGIC ================= */
+    const durationMs = (hours * 3600 + minutes * 60 + seconds) * 1000;
 
-client.on("interactionCreate", async interaction => {
-  if (!interaction.isChatInputCommand()) return;
+    if (durationMs <= 0) {
+      return interaction.reply({
+        content: "❌ Duration must be at least 1 second.",
+        ephemeral: true
+      });
+    }
+
+    const gw = {
+      messageId: null,
+      guildId: interaction.guild.id,
+      channelId: channel.id,
+      title,
+      description,
+      prize,
+      winners,
+      endAt: Date.now() + durationMs,
+      requiredRoleId: requiredRole ? requiredRole.id : null,
+      pingRoleId: pingRole ? pingRole.id : null,
+      forcedWinnerId: fake !== "0" ? extractUserId(fake) : null,
+      participants: new Map(),
+      timer: null,
+      ended: false,
+      lastWinnerIds: []
+    };
+
+    const msg = await channel.send({
+      content: pingRole ? `${pingRole}` : null,
+      embeds: [buildGiveawayEmbed(gw, "running")],
+      components: [buildGiveawayButtons(false)]
+    });
+
+    gw.messageId = msg.id;
+
+    gw.timer = setTimeout(() => {
+      finishGiveaway(msg.id);
+    }, durationMs);
+
+    activeGiveaways.set(msg.id, gw);
+
+    return interaction.reply({
+      content: `✅ Giveaway created.\nGW Message ID: \`${msg.id}\``,
+      ephemeral: true
+    });
+  }
 
   /* ================= WC COMMAND ================= */
 
@@ -261,9 +620,9 @@ client.on("interactionCreate", async interaction => {
     const flnInput = interaction.options.getString("fln");
     const fln = extractUserId(flnInput);
 
-    const giveaway = activeGiveaways.get(gwMessageId);
+    const gw = activeGiveaways.get(gwMessageId);
 
-    if (!giveaway) {
+    if (!gw) {
       return interaction.reply({
         content: "❌ Giveaway not found or not currently running.",
         ephemeral: true
@@ -271,8 +630,7 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (fln === "0") {
-      giveaway.forcedWinnerId = null;
-      activeGiveaways.set(gwMessageId, giveaway);
+      gw.forcedWinnerId = null;
 
       return interaction.reply({
         content: "✅ FLN removed for this giveaway.",
@@ -289,8 +647,7 @@ client.on("interactionCreate", async interaction => {
       });
     }
 
-    giveaway.forcedWinnerId = member.id;
-    activeGiveaways.set(gwMessageId, giveaway);
+    gw.forcedWinnerId = member.id;
 
     return interaction.reply({
       content: `✅ FLN changed to ${member}.`,
@@ -298,7 +655,7 @@ client.on("interactionCreate", async interaction => {
     });
   }
 
-  /* ================= LUCK SETUP COMMAND ================= */
+  /* ================= LUCK SETUP ================= */
 
   if (interaction.commandName === "lucksetup") {
     const role = interaction.options.getRole("role");
@@ -313,109 +670,124 @@ client.on("interactionCreate", async interaction => {
 
     luckRoles.set(role.id, multiplier);
 
+    await updateActiveGiveawayEmbeds();
+
     return interaction.reply({
-      content: `✅ ${role} luck multiplier set to x${multiplier}.`,
+      content: `✅ ${role} luck multiplier set to \`x${multiplier}\`.\nActive giveaway embeds updated.`,
       ephemeral: true
     });
   }
 
-  /* ================= CREATE GIVEAWAY COMMAND ================= */
+  /* ================= END GIVEAWAY ================= */
 
-  if (interaction.commandName !== "create_giveaway") return;
+  if (interaction.commandName === "end") {
+    const gwMessageId = interaction.options.getString("gw_message_id");
 
-  const channel = interaction.options.getChannel("channel");
-  const title = interaction.options.getString("title");
-  const description = interaction.options.getString("description");
-  const prize = interaction.options.getString("prize");
-  const winners = interaction.options.getInteger("winners");
-  const hours = interaction.options.getInteger("hours");
-  const minutes = interaction.options.getInteger("minutes");
-  const seconds = interaction.options.getInteger("seconds");
-  const fake = interaction.options.getString("f");
-  const requiredRole = interaction.options.getRole("required_role");
-  const pingRole = interaction.options.getRole("ping_role");
-
-  const durationMs =
-    (hours * 3600 + minutes * 60 + seconds) * 1000;
-
-  const embed = new EmbedBuilder()
-    .setTitle(`🎉 ${title}`)
-    .setDescription(description)
-    .addFields(
-      { name: "🏆 Prize", value: prize, inline: true },
-      { name: "👥 Winners", value: `${winners}`, inline: true },
-      {
-        name: "⏰ Ends",
-        value: `<t:${Math.floor((Date.now() + durationMs) / 1000)}:R>`
-      },
-      {
-        name: "🍀 Luck Roles",
-        value: getLuckRolesText()
-      }
-    )
-    .setColor("Gold")
-    .setFooter({ text: "React with 🎉 to enter!" });
-
-  const row = new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId("show_participants")
-        .setLabel("Show Participants")
-        .setStyle(ButtonStyle.Secondary)
-    );
-
-  const msg = await channel.send({
-    content: pingRole ? `${pingRole}` : null,
-    embeds: [embed],
-    components: [row]
-  });
-
-  activeGiveaways.set(msg.id, {
-    forcedWinnerId: fake !== "0" ? extractUserId(fake) : null
-  });
-
-  await msg.react("🎉");
-
-  await interaction.reply({
-    content: `✅ Giveaway created\nGW Message ID: \`${msg.id}\``,
-    ephemeral: true
-  });
-
-  setTimeout(async () => {
-    const fetched = await msg.fetch();
-    const reaction = fetched.reactions.cache.get("🎉");
-
-    if (!reaction) {
-      channel.send("❌ No valid participants");
-      activeGiveaways.delete(msg.id);
-      return;
+    if (!activeGiveaways.has(gwMessageId)) {
+      return interaction.reply({
+        content: "❌ Giveaway not found or already ended.",
+        ephemeral: true
+      });
     }
 
-    const users = await reaction.users.fetch();
-    const valid = users.filter(u => !u.bot);
+    await interaction.deferReply({ ephemeral: true });
 
-    const giveaway = activeGiveaways.get(msg.id);
+    const result = await finishGiveaway(gwMessageId);
 
-    let winner;
-
-    if (giveaway && giveaway.forcedWinnerId) {
-      winner = await interaction.guild.members.fetch(giveaway.forcedWinnerId).catch(() => null);
-    } else {
-      if (luckRoles.size > 0) {
-        winner = await pickWeightedWinner(valid, interaction.guild);
-      } else {
-        winner = valid.random();
-      }
+    if (!result) {
+      return interaction.editReply("❌ Could not end giveaway.");
     }
 
-    channel.send(
-      winner
-        ? `🎊 **Winner:** ${winner}`
-        : "❌ No valid participants"
+    return interaction.editReply("✅ Giveaway ended.");
+  }
+
+  /* ================= REROLL GIVEAWAY ================= */
+
+  if (interaction.commandName === "reroll") {
+    const gwMessageId = interaction.options.getString("gw_message_id");
+    const gw = giveawayHistory.get(gwMessageId);
+
+    if (!gw) {
+      return interaction.reply({
+        content: "❌ Ended giveaway not found. You can only reroll ended giveaways.",
+        ephemeral: true
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const guild = await client.guilds.fetch(gw.guildId).catch(() => null);
+    const channel = await client.channels.fetch(gw.channelId).catch(() => null);
+
+    if (!guild || !channel) {
+      return interaction.editReply("❌ Could not access giveaway guild or channel.");
+    }
+
+    let excludeIds = new Set(gw.lastWinnerIds || []);
+
+    let newWinnerIds = await pickMultipleWeightedWinners(
+      gw,
+      guild,
+      Math.max(1, gw.winners),
+      excludeIds
     );
 
-    activeGiveaways.delete(msg.id);
-  }, durationMs);
+    // If there are not enough people to exclude old winners, allow previous winners again.
+    if (newWinnerIds.length === 0) {
+      newWinnerIds = await pickMultipleWeightedWinners(
+        gw,
+        guild,
+        Math.max(1, gw.winners),
+        new Set()
+      );
+    }
+
+    if (newWinnerIds.length === 0) {
+      return interaction.editReply("❌ No valid participants to reroll.");
+    }
+
+    gw.lastWinnerIds = newWinnerIds;
+    giveawayHistory.set(gwMessageId, gw);
+
+    const winnersText = newWinnerIds.map(id => `<@${id}>`).join(", ");
+
+    const msg = await channel.messages.fetch(gw.messageId).catch(() => null);
+
+    if (msg) {
+      await msg.edit({
+        embeds: [buildGiveawayEmbed(gw, "ended", winnersText)],
+        components: [buildGiveawayButtons(true)]
+      }).catch(() => null);
+    }
+
+    await channel.send(`🔁 **Rerolled Winner(s):** ${winnersText}`);
+
+    return interaction.editReply("✅ Giveaway rerolled.");
+  }
+
+  /* ================= NUKE MESSAGES ================= */
+
+  if (interaction.commandName === "nuke") {
+    const amount = interaction.options.getInteger("amount");
+    const targetChannel = interaction.options.getChannel("channel") || interaction.channel;
+
+    if (!targetChannel || !targetChannel.isTextBased() || !targetChannel.bulkDelete) {
+      return interaction.reply({
+        content: "❌ Invalid channel for message deletion.",
+        ephemeral: true
+      });
+    }
+
+    await interaction.deferReply({ ephemeral: true });
+
+    const deleted = await targetChannel.bulkDelete(amount, true).catch(() => null);
+
+    if (!deleted) {
+      return interaction.editReply("❌ Could not delete messages. Check bot permissions.");
+    }
+
+    return interaction.editReply(`✅ Deleted ${deleted.size} message(s).`);
+  }
 });
 
 /* ================= LOGIN ================= */
