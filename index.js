@@ -52,8 +52,14 @@ async function initStockDatabase() {
       tax NUMERIC NOT NULL,
       net_amount NUMERIC NOT NULL,
       realized_profit NUMERIC NOT NULL DEFAULT 0,
+      trade_date DATE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE stock_trades
+    ADD COLUMN IF NOT EXISTS trade_date DATE;
   `);
 
   console.log("✅ Stock database ready");
@@ -183,6 +189,78 @@ async function fetchGoogleFinancePrice(symbol) {
   return null;
 }
 
+
+async function fetchYahooSearchSymbols(query) {
+  const q = String(query || "").trim();
+  if (!q) return [];
+
+  try {
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&quotesCount=10&newsCount=0&lang=zh-TW&region=TW`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"
+      }
+    });
+
+    if (!res.ok) return [];
+
+    const data = await res.json();
+    const quotes = Array.isArray(data?.quotes) ? data.quotes : [];
+    const symbols = [];
+
+    for (const quote of quotes) {
+      const symbol = String(quote?.symbol || "").toUpperCase();
+      if (!symbol) continue;
+
+      // Keep Taiwan market symbols first. This supports TWSE and TPEx.
+      if (/\.(TW|TWO)$/i.test(symbol) && !symbols.includes(symbol)) {
+        symbols.push(symbol);
+      }
+    }
+
+    return symbols;
+  } catch (err) {
+    return [];
+  }
+}
+
+async function fetchGoogleFinanceSearchSymbols(query) {
+  const q = String(query || "").trim();
+  if (!q) return [];
+
+  try {
+    const url = `https://www.google.com/finance/search?q=${encodeURIComponent(q)}&hl=zh-TW`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"
+      }
+    });
+
+    if (!res.ok) return [];
+
+    const html = await res.text();
+    const symbols = [];
+    const regex = /\/finance\/quote\/([^"/:?]+):(TPE|TWO)/g;
+    let match;
+
+    while ((match = regex.exec(html)) !== null) {
+      const base = String(match[1] || "").toUpperCase();
+      const exchange = String(match[2] || "").toUpperCase();
+      const symbol = exchange === "TWO" ? `${base}.TWO` : `${base}.TW`;
+
+      if (base && !symbols.includes(symbol)) {
+        symbols.push(symbol);
+      }
+    }
+
+    return symbols;
+  } catch (err) {
+    return [];
+  }
+}
+
 function roundMoney(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
@@ -198,6 +276,28 @@ function formatMoney(value) {
 function formatPercent(value) {
   const n = Number(value || 0);
   return `${n.toFixed(2)}%`;
+}
+
+
+function parseTradeDateInput(input) {
+  const value = String(input || "").trim();
+  if (!value) return null;
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    return "INVALID";
+  }
+
+  const date = new Date(`${value}T00:00:00Z`);
+  if (Number.isNaN(date.getTime())) {
+    return "INVALID";
+  }
+
+  return value;
+}
+
+function formatTradeDate(value) {
+  if (!value) return "未填寫";
+  return new Date(value).toLocaleDateString("zh-TW");
 }
 
 function calculateCommission(grossAmount) {
@@ -224,20 +324,58 @@ function calculateSell(grossAmount) {
   };
 }
 
-async function fetchCurrentPrice(symbol) {
-  // 1) Try Yahoo Finance first with all likely Taiwan suffixes.
-  // Example: 009823.TW can fail, but 009823.TWO works.
-  const yahooCandidates = getYahooSymbolCandidates(symbol);
+async function fetchCurrentPrice(symbol, name = null) {
+  const checkedSymbols = [];
 
-  for (const candidate of yahooCandidates) {
+  function addCandidates(values) {
+    for (const value of values || []) {
+      const normalized = String(value || "").trim().toUpperCase();
+      if (normalized && !checkedSymbols.includes(normalized)) {
+        checkedSymbols.push(normalized);
+      }
+    }
+  }
+
+  // 1) Direct lookup from the registered symbol.
+  // Example: registered 009823.TW can fail, but 009823.TWO may work.
+  addCandidates(getYahooSymbolCandidates(symbol));
+
+  for (const candidate of checkedSymbols) {
     const price = await fetchYahooCurrentPrice(candidate);
     if (price !== null) return price;
   }
 
-  // 2) Fallback to Google Finance page parsing.
-  // This is not an official API, so Yahoo remains the preferred source.
-  const googlePrice = await fetchGoogleFinancePrice(symbol);
-  if (googlePrice !== null) return googlePrice;
+  for (const candidate of checkedSymbols) {
+    const price = await fetchGoogleFinancePrice(candidate);
+    if (price !== null) return price;
+  }
+
+  // 2) If the registered stock code is wrong or not recognized, resolve by股名.
+  // Example: if user registered 台積電 with a wrong code, search 台積電 and use the matched listed ticker.
+  const searchQueries = [name, `${name || ""} 股票`, getStockBase(symbol)].filter(Boolean);
+
+  for (const query of searchQueries) {
+    const yahooSearchSymbols = await fetchYahooSearchSymbols(query);
+    addCandidates(yahooSearchSymbols);
+
+    for (const candidate of yahooSearchSymbols) {
+      const price = await fetchYahooCurrentPrice(candidate);
+      if (price !== null) return price;
+    }
+  }
+
+  for (const query of searchQueries) {
+    const googleSearchSymbols = await fetchGoogleFinanceSearchSymbols(query);
+    addCandidates(googleSearchSymbols);
+
+    for (const candidate of googleSearchSymbols) {
+      const price = await fetchYahooCurrentPrice(candidate);
+      if (price !== null) return price;
+
+      const googlePrice = await fetchGoogleFinancePrice(candidate);
+      if (googlePrice !== null) return googlePrice;
+    }
+  }
 
   return null;
 }
@@ -288,10 +426,14 @@ function buildPositions(trades) {
 
     if (trade.type === "SELL") {
       const avgCost = pos.shares > 0 ? pos.costBasis / pos.shares : 0;
+      const avgGross = pos.shares > 0 ? pos.totalBuyGross / pos.shares : 0;
       const removedCost = avgCost * shares;
+      const removedGross = avgGross * shares;
 
       pos.shares -= shares;
       pos.costBasis -= removedCost;
+      pos.totalBuyGross -= removedGross;
+      pos.totalBuyCost -= removedCost;
       pos.realizedProfit += net - removedCost;
       pos.totalSellGross += gross;
       pos.totalSellNet += net;
@@ -299,6 +441,8 @@ function buildPositions(trades) {
       if (pos.shares < 0.000001) {
         pos.shares = 0;
         pos.costBasis = 0;
+        pos.totalBuyGross = 0;
+        pos.totalBuyCost = 0;
       }
     }
   }
@@ -319,7 +463,8 @@ function createHistoryCsv(trades) {
     "證交稅",
     "實付/實收",
     "已實現損益",
-    "時間"
+    "實際交易日期",
+    "紀錄時間"
   ];
 
   const lines = [header.join(",")];
@@ -337,6 +482,7 @@ function createHistoryCsv(trades) {
       Number(t.tax).toFixed(2),
       Number(t.net_amount).toFixed(2),
       Number(t.realized_profit).toFixed(2),
+      t.trade_date ? new Date(t.trade_date).toLocaleDateString("zh-TW") : "未填寫",
       new Date(t.created_at).toLocaleString("zh-TW")
     ].map(v => `"${String(v).replace(/"/g, '""')}"`);
 
@@ -406,7 +552,8 @@ const commands = [
     .addStringOption(o => o.setName("stock").setDescription("股票代號，例如 2330 或 2330.TW").setRequired(true))
     .addStringOption(o => o.setName("name").setDescription("股名，例如 台積電").setRequired(true))
     .addNumberOption(o => o.setName("shares").setDescription("股數").setRequired(true))
-    .addNumberOption(o => o.setName("price").setDescription("每股成交價格").setRequired(true)),
+    .addNumberOption(o => o.setName("price").setDescription("每股成交價格").setRequired(true))
+    .addStringOption(o => o.setName("date").setDescription("實際買進日期，例如 2026-08-10，可不填")),
 
   new SlashCommandBuilder()
     .setName("sellstock")
@@ -414,7 +561,8 @@ const commands = [
     .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
     .addStringOption(o => o.setName("stock").setDescription("股票代號，例如 2330 或 2330.TW").setRequired(true))
     .addNumberOption(o => o.setName("shares").setDescription("賣出股數").setRequired(true))
-    .addNumberOption(o => o.setName("price").setDescription("每股賣出價格").setRequired(true)),
+    .addNumberOption(o => o.setName("price").setDescription("每股賣出價格").setRequired(true))
+    .addStringOption(o => o.setName("date").setDescription("實際賣出日期，例如 2026-08-10，可不填")),
 
   new SlashCommandBuilder()
     .setName("showstock")
@@ -557,6 +705,11 @@ client.on("interactionCreate", async interaction => {
       const name = interaction.options.getString("name").trim();
       const shares = Number(interaction.options.getNumber("shares"));
       const price = Number(interaction.options.getNumber("price"));
+      const tradeDate = parseTradeDateInput(interaction.options.getString("date"));
+
+      if (tradeDate === "INVALID") {
+        return interaction.reply({ content: "❌ 日期格式錯誤，請使用 YYYY-MM-DD，例如 2026-08-10。", ephemeral: true });
+      }
 
       if (!symbol || !name || shares <= 0 || price <= 0) {
         return interaction.reply({ content: "❌ 股票代號、股名、股數或價格無效。", ephemeral: true });
@@ -567,10 +720,10 @@ client.on("interactionCreate", async interaction => {
 
       const result = await pool.query(
         `INSERT INTO stock_trades
-         (user_id, symbol, name, type, shares, price, gross_amount, commission, tax, net_amount, realized_profit)
-         VALUES ($1,$2,$3,'BUY',$4,$5,$6,$7,$8,$9,0)
+         (user_id, symbol, name, type, shares, price, gross_amount, commission, tax, net_amount, realized_profit, trade_date)
+         VALUES ($1,$2,$3,'BUY',$4,$5,$6,$7,$8,$9,0,$10)
          RETURNING id`,
-        [interaction.user.id, symbol, name, shares, price, grossAmount, fee.commission, fee.tax, fee.netAmount]
+        [interaction.user.id, symbol, name, shares, price, grossAmount, fee.commission, fee.tax, fee.netAmount, tradeDate]
       );
 
       const embed = new EmbedBuilder()
@@ -578,6 +731,7 @@ client.on("interactionCreate", async interaction => {
         .setColor(0x2ecc71)
         .addFields(
           { name: "紀錄 ID", value: `${result.rows[0].id}`, inline: true },
+          { name: "實際買進日期", value: tradeDate || "未填寫", inline: true },
           { name: "股票", value: `${name} (${symbol})`, inline: true },
           { name: "股數", value: `${shares}`, inline: true },
           { name: "成交均價", value: formatMoney(price), inline: true },
@@ -598,6 +752,11 @@ client.on("interactionCreate", async interaction => {
       const symbol = normalizeStockSymbol(interaction.options.getString("stock"));
       const shares = Number(interaction.options.getNumber("shares"));
       const price = Number(interaction.options.getNumber("price"));
+      const tradeDate = parseTradeDateInput(interaction.options.getString("date"));
+
+      if (tradeDate === "INVALID") {
+        return interaction.reply({ content: "❌ 日期格式錯誤，請使用 YYYY-MM-DD，例如 2026-08-10。", ephemeral: true });
+      }
 
       if (!symbol || shares <= 0 || price <= 0) {
         return interaction.reply({ content: "❌ 股票代號、股數或價格無效。", ephemeral: true });
@@ -622,10 +781,10 @@ client.on("interactionCreate", async interaction => {
 
       const result = await pool.query(
         `INSERT INTO stock_trades
-         (user_id, symbol, name, type, shares, price, gross_amount, commission, tax, net_amount, realized_profit)
-         VALUES ($1,$2,$3,'SELL',$4,$5,$6,$7,$8,$9,$10)
+         (user_id, symbol, name, type, shares, price, gross_amount, commission, tax, net_amount, realized_profit, trade_date)
+         VALUES ($1,$2,$3,'SELL',$4,$5,$6,$7,$8,$9,$10,$11)
          RETURNING id`,
-        [interaction.user.id, symbol, pos.name, shares, price, grossAmount, fee.commission, fee.tax, fee.netAmount, realizedProfit]
+        [interaction.user.id, symbol, pos.name, shares, price, grossAmount, fee.commission, fee.tax, fee.netAmount, realizedProfit, tradeDate]
       );
 
       const embed = new EmbedBuilder()
@@ -633,6 +792,7 @@ client.on("interactionCreate", async interaction => {
         .setColor(realizedProfit >= 0 ? 0x2ecc71 : 0xe74c3c)
         .addFields(
           { name: "紀錄 ID", value: `${result.rows[0].id}`, inline: true },
+          { name: "實際賣出日期", value: tradeDate || "未填寫", inline: true },
           { name: "股票", value: `${pos.name} (${symbol})`, inline: true },
           { name: "賣出股數", value: `${shares}`, inline: true },
           { name: "賣出單價", value: formatMoney(price), inline: true },
@@ -671,7 +831,7 @@ client.on("interactionCreate", async interaction => {
       const lines = [];
 
       for (const pos of openPositions) {
-        const currentPrice = await fetchCurrentPrice(pos.symbol);
+        const currentPrice = await fetchCurrentPrice(pos.symbol, pos.name);
         const avgCost = pos.shares > 0 ? pos.costBasis / pos.shares : 0;
 
         totalCost += pos.costBasis;
