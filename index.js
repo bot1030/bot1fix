@@ -91,6 +91,35 @@ function getStockBase(symbol) {
     .replace(/\.(TW|TWO)$/i, "");
 }
 
+function findPositionByStockInput(positions, inputSymbol) {
+  const normalizedInput = normalizeStockSymbol(inputSymbol);
+  const inputBase = getStockBase(normalizedInput);
+
+  // 1) Exact match first.
+  if (positions.has(normalizedInput)) {
+    return {
+      symbol: normalizedInput,
+      position: positions.get(normalizedInput)
+    };
+  }
+
+  // 2) Same Taiwan stock code with different suffix or no suffix.
+  // Example: selling 00881 should match a holding stored as 00881.TW.
+  for (const [storedSymbol, position] of positions.entries()) {
+    if (getStockBase(storedSymbol) === inputBase) {
+      return {
+        symbol: storedSymbol,
+        position
+      };
+    }
+  }
+
+  return {
+    symbol: normalizedInput,
+    position: null
+  };
+}
+
 function getYahooSymbolCandidates(symbol) {
   const raw = String(symbol || "").trim().toUpperCase();
   const base = getStockBase(raw);
@@ -764,11 +793,13 @@ client.on("interactionCreate", async interaction => {
 
       const trades = await getUserTrades(interaction.user.id);
       const positions = buildPositions(trades);
-      const pos = positions.get(symbol);
+      const matched = findPositionByStockInput(positions, symbol);
+      const matchedSymbol = matched.symbol;
+      const pos = matched.position;
 
       if (!pos || pos.shares < shares) {
         return interaction.reply({
-          content: `❌ 持股不足。你目前持有 ${pos ? pos.shares : 0} 股 ${symbol}。`,
+          content: `❌ 持股不足。你目前持有 ${pos ? pos.shares : 0} 股 ${matchedSymbol}。`,
           ephemeral: true
         });
       }
@@ -784,7 +815,7 @@ client.on("interactionCreate", async interaction => {
          (user_id, symbol, name, type, shares, price, gross_amount, commission, tax, net_amount, realized_profit, trade_date)
          VALUES ($1,$2,$3,'SELL',$4,$5,$6,$7,$8,$9,$10,$11)
          RETURNING id`,
-        [interaction.user.id, symbol, pos.name, shares, price, grossAmount, fee.commission, fee.tax, fee.netAmount, realizedProfit, tradeDate]
+        [interaction.user.id, matchedSymbol, pos.name, shares, price, grossAmount, fee.commission, fee.tax, fee.netAmount, realizedProfit, tradeDate]
       );
 
       const embed = new EmbedBuilder()
@@ -793,7 +824,7 @@ client.on("interactionCreate", async interaction => {
         .addFields(
           { name: "紀錄 ID", value: `${result.rows[0].id}`, inline: true },
           { name: "實際賣出日期", value: tradeDate || "未填寫", inline: true },
-          { name: "股票", value: `${pos.name} (${symbol})`, inline: true },
+          { name: "股票", value: `${pos.name} (${matchedSymbol})`, inline: true },
           { name: "賣出股數", value: `${shares}`, inline: true },
           { name: "賣出單價", value: formatMoney(price), inline: true },
           { name: "成交金額", value: formatMoney(grossAmount), inline: true },
