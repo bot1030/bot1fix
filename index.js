@@ -916,7 +916,7 @@ client.on("interactionCreate", async interaction => {
             `成交金額：${formatMoney(pos.totalBuyGross)}\n` +
             `投資成本：${formatMoney(pos.costBasis)}\n` +
             `現在價格：${formatMoney(currentPrice)}\n` +
-            `成交均價：${formatMoney(avgCost)}\n` +
+            `成交均價：${formatMoney(avgTradePrice)}\n` +
             `帳面收入：${formatMoney(marketNet)}\n` +
             `未實現損益：${formatMoney(unrealized)}\n` +
             `損益率：${formatPercent(profitRate)}\n` +
@@ -929,7 +929,7 @@ client.on("interactionCreate", async interaction => {
             `成交金額：${formatMoney(pos.totalBuyGross)}\n` +
             `投資成本：${formatMoney(pos.costBasis)}\n` +
             `現在價格：無法取得\n` +
-            `成交均價：${formatMoney(avgCost)}\n` +
+            `成交均價：${formatMoney(avgTradePrice)}\n` +
             `帳面收入：無法計算\n` +
             `未實現損益：無法計算\n` +
             `損益率：無法計算\n` +
