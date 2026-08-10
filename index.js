@@ -70,7 +70,8 @@ async function initStockDatabase() {
 const COMMISSION_RATE = 0.001425;
 const TAISHIN_DISCOUNT = 0.28;
 const MIN_COMMISSION = 20;
-const SELL_TAX_RATE = 0.003;
+const STOCK_SELL_TAX_RATE = 0.003; // 股票賣出證交稅 0.3%
+const ETF_SELL_TAX_RATE = 0.001;   // ETF 賣出證交稅 0.1%
 
 function normalizeStockSymbol(input) {
   const raw = String(input || "").trim().toUpperCase();
@@ -343,9 +344,21 @@ function calculateBuy(grossAmount) {
   };
 }
 
-function calculateSell(grossAmount) {
+function getSellTaxRate(symbol, name = "") {
+  const base = getStockBase(symbol);
+  const text = `${symbol || ""} ${name || ""}`.toUpperCase();
+
+  // Taiwan ETFs usually use 00xxx / 009xxx / active ETF codes such as 00403A.
+  // ETF sell tax is lower than regular stocks.
+  if (/^00[0-9A-Z]{2,6}$/.test(base)) return ETF_SELL_TAX_RATE;
+  if (/ETF|0050|00881|009|S&P|P500|台灣50|科技龍頭|群益|元大/.test(text)) return ETF_SELL_TAX_RATE;
+
+  return STOCK_SELL_TAX_RATE;
+}
+
+function calculateSell(grossAmount, taxRate = STOCK_SELL_TAX_RATE) {
   const commission = calculateCommission(grossAmount);
-  const tax = roundMoney(Number(grossAmount) * SELL_TAX_RATE);
+  const tax = roundMoney(Number(grossAmount) * taxRate);
   return {
     commission,
     tax,
@@ -582,6 +595,8 @@ const commands = [
     .addStringOption(o => o.setName("name").setDescription("股名，例如 台積電").setRequired(true))
     .addNumberOption(o => o.setName("shares").setDescription("股數").setRequired(true))
     .addNumberOption(o => o.setName("price").setDescription("每股成交價格").setRequired(true))
+    .addNumberOption(o => o.setName("gross").setDescription("官方成交金額，可不填"))
+    .addNumberOption(o => o.setName("cost").setDescription("官方投資成本，可不填"))
     .addStringOption(o => o.setName("date").setDescription("實際買進日期，例如 2026-08-10，可不填")),
 
   new SlashCommandBuilder()
@@ -602,7 +617,20 @@ const commands = [
     .setName("deletestock")
     .setDescription("刪除錯誤股票紀錄")
     .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
-    .addIntegerOption(o => o.setName("id").setDescription("要刪除的紀錄 ID").setRequired(true))
+    .addIntegerOption(o => o.setName("id").setDescription("要刪除的紀錄 ID").setRequired(true)),
+
+  new SlashCommandBuilder()
+    .setName("editstock")
+    .setDescription("修改股票買進紀錄")
+    .setDefaultMemberPermissions(PermissionsBitField.Flags.Administrator)
+    .addIntegerOption(o => o.setName("id").setDescription("要修改的紀錄 ID").setRequired(true))
+    .addStringOption(o => o.setName("stock").setDescription("新的股票代號，可不填"))
+    .addStringOption(o => o.setName("name").setDescription("新的股名，可不填"))
+    .addNumberOption(o => o.setName("shares").setDescription("新的股數，可不填"))
+    .addNumberOption(o => o.setName("price").setDescription("新的成交均價，可不填"))
+    .addNumberOption(o => o.setName("gross").setDescription("新的官方成交金額，可不填"))
+    .addNumberOption(o => o.setName("cost").setDescription("新的官方投資成本，可不填"))
+    .addStringOption(o => o.setName("date").setDescription("新的實際交易日期 YYYY-MM-DD，可不填"))
 ].map(c => c.toJSON());
 
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
@@ -744,15 +772,19 @@ client.on("interactionCreate", async interaction => {
         return interaction.reply({ content: "❌ 股票代號、股名、股數或價格無效。", ephemeral: true });
       }
 
-      const grossAmount = roundMoney(shares * price);
-      const fee = calculateBuy(grossAmount);
+      const officialGross = interaction.options.getNumber("gross");
+      const officialCost = interaction.options.getNumber("cost");
+      const grossAmount = roundMoney(officialGross && officialGross > 0 ? officialGross : shares * price);
+      const calculatedBuy = calculateBuy(grossAmount);
+      const netAmount = roundMoney(officialCost && officialCost > 0 ? officialCost : calculatedBuy.netAmount);
+      const commission = roundMoney(netAmount - grossAmount);
 
       const result = await pool.query(
         `INSERT INTO stock_trades
          (user_id, symbol, name, type, shares, price, gross_amount, commission, tax, net_amount, realized_profit, trade_date)
          VALUES ($1,$2,$3,'BUY',$4,$5,$6,$7,$8,$9,0,$10)
          RETURNING id`,
-        [interaction.user.id, symbol, name, shares, price, grossAmount, fee.commission, fee.tax, fee.netAmount, tradeDate]
+        [interaction.user.id, symbol, name, shares, price, grossAmount, commission, 0, netAmount, tradeDate]
       );
 
       const embed = new EmbedBuilder()
@@ -765,10 +797,10 @@ client.on("interactionCreate", async interaction => {
           { name: "股數", value: `${shares}`, inline: true },
           { name: "成交均價", value: formatMoney(price), inline: true },
           { name: "成交金額", value: formatMoney(grossAmount), inline: true },
-          { name: "買進手續費", value: formatMoney(fee.commission), inline: true },
-          { name: "投資成本", value: formatMoney(fee.netAmount), inline: true }
+          { name: "買進手續費", value: formatMoney(commission), inline: true },
+          { name: "投資成本", value: formatMoney(netAmount), inline: true }
         )
-        .setFooter({ text: "手續費已依台新證券 2.8 折與最低 20 元計算。" })
+        .setFooter({ text: "若未填官方成交金額／投資成本，系統才會依台新證券 2.8 折與最低 20 元估算。" })
         .setTimestamp();
 
       return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -807,7 +839,7 @@ client.on("interactionCreate", async interaction => {
       const avgCost = pos.costBasis / pos.shares;
       const removedCost = avgCost * shares;
       const grossAmount = roundMoney(shares * price);
-      const fee = calculateSell(grossAmount);
+      const fee = calculateSell(grossAmount, getSellTaxRate(matchedSymbol, pos.name));
       const realizedProfit = roundMoney(fee.netAmount - removedCost);
 
       const result = await pool.query(
@@ -833,7 +865,7 @@ client.on("interactionCreate", async interaction => {
           { name: "實際收入", value: formatMoney(fee.netAmount), inline: true },
           { name: "已實現損益", value: formatMoney(realizedProfit), inline: true }
         )
-        .setFooter({ text: "賣出已扣除手續費與 0.3% 證交稅。" })
+        .setFooter({ text: "賣出已扣除手續費；ETF 以 0.1% 證交稅估算，股票以 0.3% 證交稅估算。" })
         .setTimestamp();
 
       return interaction.reply({ embeds: [embed], ephemeral: true });
@@ -863,13 +895,14 @@ client.on("interactionCreate", async interaction => {
 
       for (const pos of openPositions) {
         const currentPrice = await fetchCurrentPrice(pos.symbol, pos.name);
-        const avgCost = pos.shares > 0 ? pos.costBasis / pos.shares : 0;
+        const avgTradePrice = pos.shares > 0 ? pos.totalBuyGross / pos.shares : 0;
+        const breakEvenPrice = pos.shares > 0 ? pos.costBasis / pos.shares : 0;
 
         totalCost += pos.costBasis;
 
         if (currentPrice !== null) {
           const marketGross = roundMoney(currentPrice * pos.shares);
-          const exitFee = calculateSell(marketGross);
+          const exitFee = calculateSell(marketGross, getSellTaxRate(pos.symbol, pos.name));
           const marketNet = exitFee.netAmount;
           const unrealized = roundMoney(marketNet - pos.costBasis);
           const profitRate = pos.costBasis > 0 ? (unrealized / pos.costBasis) * 100 : 0;
@@ -920,7 +953,7 @@ client.on("interactionCreate", async interaction => {
           { name: "總損益", value: formatMoney(totalProfit), inline: true },
           { name: "未實現損益率", value: formatPercent(unrealizedRate), inline: true }
         )
-        .setFooter({ text: "未實現損益以 Yahoo Finance／Google Finance 目前價格估算，並扣除預估賣出手續費與證交稅。" })
+        .setFooter({ text: "未實現損益以目前價格估算；ETF 賣出稅用 0.1%，股票用 0.3%。若要完全對齊券商 App，請在 /buy 填官方成交金額與官方投資成本。" })
         .setTimestamp();
 
       const embeds = [summaryEmbed];
@@ -963,6 +996,73 @@ client.on("interactionCreate", async interaction => {
         embeds: embeds.slice(0, 10),
         files: [file]
       });
+    }
+
+    /* ---- EDIT STOCK RECORD ---- */
+    if (interaction.commandName === "editstock") {
+      if (requireDatabaseReply(interaction)) return;
+
+      const id = interaction.options.getInteger("id");
+      const existing = await pool.query(
+        `SELECT * FROM stock_trades WHERE id = $1 AND user_id = $2`,
+        [id, interaction.user.id]
+      );
+
+      if (!existing.rows.length) {
+        return interaction.reply({ content: "❌ 找不到此紀錄，或你沒有權限修改。", ephemeral: true });
+      }
+
+      const old = existing.rows[0];
+      if (old.type !== "BUY") {
+        return interaction.reply({ content: "❌ 目前 editstock 只支援修改買進紀錄。賣出紀錄建議刪除後重新登記。", ephemeral: true });
+      }
+
+      const newSymbolInput = interaction.options.getString("stock");
+      const newNameInput = interaction.options.getString("name");
+      const newSharesInput = interaction.options.getNumber("shares");
+      const newPriceInput = interaction.options.getNumber("price");
+      const newGrossInput = interaction.options.getNumber("gross");
+      const newCostInput = interaction.options.getNumber("cost");
+      const newDateInput = interaction.options.getString("date");
+      const tradeDate = newDateInput === null ? old.trade_date : parseTradeDateInput(newDateInput);
+
+      if (tradeDate === "INVALID") {
+        return interaction.reply({ content: "❌ 日期格式錯誤，請使用 YYYY-MM-DD，例如 2026-08-10。", ephemeral: true });
+      }
+
+      const symbol = newSymbolInput ? normalizeStockSymbol(newSymbolInput) : old.symbol;
+      const name = newNameInput ? newNameInput.trim() : old.name;
+      const shares = newSharesInput && newSharesInput > 0 ? Number(newSharesInput) : Number(old.shares);
+      const price = newPriceInput && newPriceInput > 0 ? Number(newPriceInput) : Number(old.price);
+      const grossAmount = roundMoney(newGrossInput && newGrossInput > 0 ? newGrossInput : shares * price);
+      const calculatedBuy = calculateBuy(grossAmount);
+      const netAmount = roundMoney(newCostInput && newCostInput > 0 ? newCostInput : calculatedBuy.netAmount);
+      const commission = roundMoney(netAmount - grossAmount);
+
+      await pool.query(
+        `UPDATE stock_trades
+         SET symbol = $1, name = $2, shares = $3, price = $4, gross_amount = $5,
+             commission = $6, tax = 0, net_amount = $7, trade_date = $8
+         WHERE id = $9 AND user_id = $10`,
+        [symbol, name, shares, price, grossAmount, commission, netAmount, tradeDate, id, interaction.user.id]
+      );
+
+      const embed = new EmbedBuilder()
+        .setTitle("✅ 股票紀錄已修改")
+        .setColor(0x3498db)
+        .addFields(
+          { name: "紀錄 ID", value: `${id}`, inline: true },
+          { name: "股票", value: `${name} (${symbol})`, inline: true },
+          { name: "股數", value: `${shares}`, inline: true },
+          { name: "成交均價", value: formatMoney(price), inline: true },
+          { name: "成交金額", value: formatMoney(grossAmount), inline: true },
+          { name: "投資成本", value: formatMoney(netAmount), inline: true },
+          { name: "實際交易日期", value: tradeDate ? String(tradeDate).slice(0, 10) : "未填寫", inline: true }
+        )
+        .setFooter({ text: "修改後 /showstock 會用新的成交金額與投資成本重新計算。" })
+        .setTimestamp();
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
     /* ---- DELETE STOCK RECORD ---- */
