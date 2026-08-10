@@ -366,6 +366,21 @@ function calculateSell(grossAmount, taxRate = STOCK_SELL_TAX_RATE) {
   };
 }
 
+// 券商 App 的「未實現損益／帳面收入」試算通常不是使用實際電子下單折扣，
+// 而是以牌告手續費 0.1425%（最低 20 元）加上證交稅估算，並以整數元顯示。
+// 這個函式只用於 /showstock 的目前持股試算，不改變 /buy、/sellstock 的實際紀錄邏輯。
+function calculateBrokerPreviewSell(grossAmount, taxRate = STOCK_SELL_TAX_RATE) {
+  const gross = Number(grossAmount);
+  const commission = Math.max(MIN_COMMISSION, Math.floor(gross * COMMISSION_RATE));
+  const tax = Math.floor(gross * taxRate);
+
+  return {
+    commission,
+    tax,
+    netAmount: gross - commission - tax
+  };
+}
+
 async function fetchCurrentPrice(symbol, name = null) {
   const checkedSymbols = [];
 
@@ -433,6 +448,58 @@ async function getUserTrades(userId) {
   return result.rows;
 }
 
+function consumeFifoLots(lots, sharesToRemove) {
+  let remaining = Number(sharesToRemove);
+  let removedCost = 0;
+  let removedGross = 0;
+
+  while (remaining > 0.0000001 && lots.length > 0) {
+    const lot = lots[0];
+    const lotSharesBefore = Number(lot.shares);
+
+    if (lotSharesBefore <= 0.0000001) {
+      lots.shift();
+      continue;
+    }
+
+    const take = Math.min(remaining, lotSharesBefore);
+    const ratio = take / lotSharesBefore;
+
+    const costTaken = Number(lot.cost) * ratio;
+    const grossTaken = Number(lot.gross) * ratio;
+
+    removedCost += costTaken;
+    removedGross += grossTaken;
+
+    lot.shares = lotSharesBefore - take;
+    lot.cost = Number(lot.cost) - costTaken;
+    lot.gross = Number(lot.gross) - grossTaken;
+
+    remaining -= take;
+
+    if (lot.shares <= 0.0000001) {
+      lots.shift();
+    }
+  }
+
+  return {
+    removedShares: Number(sharesToRemove) - remaining,
+    removedCost,
+    removedGross,
+    unfilledShares: remaining
+  };
+}
+
+function previewFifoRemoval(position, sharesToRemove) {
+  const clonedLots = (position.lots || []).map(lot => ({
+    shares: Number(lot.shares),
+    cost: Number(lot.cost),
+    gross: Number(lot.gross)
+  }));
+
+  return consumeFifoLots(clonedLots, sharesToRemove);
+}
+
 function buildPositions(trades) {
   const positions = new Map();
 
@@ -449,7 +516,8 @@ function buildPositions(trades) {
         totalBuyGross: 0,
         totalBuyCost: 0,
         totalSellGross: 0,
-        totalSellNet: 0
+        totalSellNet: 0,
+        lots: []
       });
     }
 
@@ -460,39 +528,73 @@ function buildPositions(trades) {
 
     if (trade.type === "BUY") {
       pos.name = trade.name;
-      pos.shares += shares;
-      pos.costBasis += net;
-      pos.totalBuyGross += gross;
-      pos.totalBuyCost += net;
+      pos.lots.push({
+        shares,
+        gross,
+        cost: net,
+        tradeId: trade.id
+      });
     }
 
     if (trade.type === "SELL") {
-      const avgCost = pos.shares > 0 ? pos.costBasis / pos.shares : 0;
-      const avgGross = pos.shares > 0 ? pos.totalBuyGross / pos.shares : 0;
-      const removedCost = avgCost * shares;
-      const removedGross = avgGross * shares;
+      const removal = consumeFifoLots(pos.lots, shares);
 
-      pos.shares -= shares;
-      pos.costBasis -= removedCost;
-      pos.totalBuyGross -= removedGross;
-      pos.totalBuyCost -= removedCost;
-      pos.realizedProfit += net - removedCost;
+      // 已實現損益採「先進先出」：先扣除最早買進批次的成本。
+      // 這也會讓部分賣出後的剩餘庫存成本與券商 App 的庫存邏輯一致。
+      pos.realizedProfit += net - removal.removedCost;
       pos.totalSellGross += gross;
       pos.totalSellNet += net;
+    }
 
-      if (pos.shares < 0.000001) {
-        pos.shares = 0;
-        pos.costBasis = 0;
-        pos.totalBuyGross = 0;
-        pos.totalBuyCost = 0;
-      }
+    // 每筆交易後都由尚未賣出的 lot 重新計算目前庫存，避免平均成本部分賣出造成偏差。
+    pos.shares = pos.lots.reduce((sum, lot) => sum + Number(lot.shares), 0);
+    pos.costBasis = pos.lots.reduce((sum, lot) => sum + Number(lot.cost), 0);
+    pos.totalBuyGross = pos.lots.reduce((sum, lot) => sum + Number(lot.gross), 0);
+    pos.totalBuyCost = pos.costBasis;
+
+    if (pos.shares < 0.000001) {
+      pos.shares = 0;
+      pos.costBasis = 0;
+      pos.totalBuyGross = 0;
+      pos.totalBuyCost = 0;
+      pos.lots = [];
     }
   }
 
   return positions;
 }
 
+function calculateFifoRealizedByTradeId(trades) {
+  const lotsBySymbol = new Map();
+  const realizedByTradeId = new Map();
+
+  for (const trade of trades) {
+    const symbol = normalizeStockSymbol(trade.symbol);
+    if (!lotsBySymbol.has(symbol)) lotsBySymbol.set(symbol, []);
+    const lots = lotsBySymbol.get(symbol);
+
+    const shares = Number(trade.shares);
+    const gross = Number(trade.gross_amount);
+    const net = Number(trade.net_amount);
+
+    if (trade.type === "BUY") {
+      lots.push({ shares, gross, cost: net });
+      realizedByTradeId.set(Number(trade.id), 0);
+      continue;
+    }
+
+    if (trade.type === "SELL") {
+      const removal = consumeFifoLots(lots, shares);
+      realizedByTradeId.set(Number(trade.id), roundMoney(net - removal.removedCost));
+    }
+  }
+
+  return realizedByTradeId;
+}
+
 function createHistoryCsv(trades) {
+  const fifoRealized = calculateFifoRealizedByTradeId(trades);
+
   const header = [
     "ID",
     "類型",
@@ -523,7 +625,7 @@ function createHistoryCsv(trades) {
       Number(t.commission).toFixed(2),
       Number(t.tax).toFixed(2),
       Number(t.net_amount).toFixed(2),
-      Number(t.realized_profit).toFixed(2),
+      Number(fifoRealized.get(Number(t.id)) ?? t.realized_profit ?? 0).toFixed(2),
       t.trade_date ? new Date(t.trade_date).toLocaleDateString("zh-TW") : "未填寫",
       new Date(t.created_at).toLocaleString("zh-TW")
     ].map(v => `"${String(v).replace(/"/g, '""')}"`);
@@ -836,8 +938,8 @@ client.on("interactionCreate", async interaction => {
         });
       }
 
-      const avgCost = pos.costBasis / pos.shares;
-      const removedCost = avgCost * shares;
+      const fifoRemoval = previewFifoRemoval(pos, shares);
+      const removedCost = fifoRemoval.removedCost;
       const grossAmount = roundMoney(shares * price);
       const fee = calculateSell(grossAmount, getSellTaxRate(matchedSymbol, pos.name));
       const realizedProfit = roundMoney(fee.netAmount - removedCost);
@@ -902,7 +1004,7 @@ client.on("interactionCreate", async interaction => {
 
         if (currentPrice !== null) {
           const marketGross = roundMoney(currentPrice * pos.shares);
-          const exitFee = calculateSell(marketGross, getSellTaxRate(pos.symbol, pos.name));
+          const exitFee = calculateBrokerPreviewSell(marketGross, getSellTaxRate(pos.symbol, pos.name));
           const marketNet = exitFee.netAmount;
           const unrealized = roundMoney(marketNet - pos.costBasis);
           const profitRate = pos.costBasis > 0 ? (unrealized / pos.costBasis) * 100 : 0;
@@ -948,12 +1050,12 @@ client.on("interactionCreate", async interaction => {
           { name: "目前持股檔數", value: `${openPositions.length}`, inline: true },
           { name: "交易紀錄數", value: `${trades.length}`, inline: true },
           { name: "目前投資成本", value: formatMoney(totalCost), inline: true },
-          { name: "已實現損益", value: formatMoney(totalRealized), inline: true },
-          { name: "未實現損益", value: formatMoney(totalUnrealized), inline: true },
-          { name: "總損益", value: formatMoney(totalProfit), inline: true },
-          { name: "未實現損益率", value: formatPercent(unrealizedRate), inline: true }
+          { name: "💰 已實現損益（已賣出）", value: formatMoney(totalRealized), inline: true },
+          { name: "📊 目前持股未實現損益", value: formatMoney(totalUnrealized), inline: true },
+          { name: "🧾 累計總損益", value: formatMoney(totalProfit), inline: true },
+          { name: "目前持股損益率", value: formatPercent(unrealizedRate), inline: true }
         )
-        .setFooter({ text: "未實現損益以目前價格估算；ETF 賣出稅用 0.1%，股票用 0.3%。若要完全對齊券商 App，請在 /buy 填官方成交金額與官方投資成本。" })
+        .setFooter({ text: "券商 App 的『未實現總損益』請對照『目前持股未實現損益』。部分賣出成本採先進先出；目前持股試算使用牌告手續費 0.1425%（最低 20 元）及 ETF 0.1%／股票 0.3% 證交稅。" })
         .setTimestamp();
 
       const embeds = [summaryEmbed];
