@@ -68,8 +68,119 @@ const SELL_TAX_RATE = 0.003;
 
 function normalizeStockSymbol(input) {
   const raw = String(input || "").trim().toUpperCase();
-  if (/^\d{4,6}$/.test(raw)) return `${raw}.TW`;
+  if (!raw) return raw;
+
+  // Keep user-provided Taiwan suffix if they typed it.
+  if (/\.(TW|TWO)$/i.test(raw)) return raw;
+
+  // Taiwan stocks/ETFs may be listed on either TWSE (.TW) or TPEx (.TWO).
+  // Do not force .TW here; fetchCurrentPrice will try both .TW and .TWO.
   return raw;
+}
+
+function getStockBase(symbol) {
+  return String(symbol || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\.(TW|TWO)$/i, "");
+}
+
+function getYahooSymbolCandidates(symbol) {
+  const raw = String(symbol || "").trim().toUpperCase();
+  const base = getStockBase(raw);
+  const candidates = [];
+
+  function add(value) {
+    if (value && !candidates.includes(value)) candidates.push(value);
+  }
+
+  add(raw);
+
+  if (base) {
+    add(`${base}.TW`);
+    add(`${base}.TWO`);
+  }
+
+  return candidates;
+}
+
+function parseGoogleFinancePrice(html) {
+  if (!html) return null;
+
+  const patterns = [
+    /class="YMlKec fxKbKc"[^>]*>([^<]+)</,
+    /data-last-price="([0-9.,]+)"/,
+    /"lastPrice":"?([0-9.,]+)"?/
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (!match) continue;
+
+    const cleaned = String(match[1])
+      .replace(/,/g, "")
+      .replace(/NT\$/gi, "")
+      .replace(/TWD/gi, "")
+      .replace(/[^0-9.\-]/g, "")
+      .trim();
+
+    const price = Number(cleaned);
+    if (Number.isFinite(price) && price > 0) return price;
+  }
+
+  return null;
+}
+
+async function fetchYahooCurrentPrice(yahooSymbol) {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(yahooSymbol)}?interval=1d&range=1d`;
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0"
+      }
+    });
+
+    if (!res.ok) return null;
+
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    const price = result?.meta?.regularMarketPrice;
+
+    if (!Number.isFinite(Number(price))) return null;
+    return Number(price);
+  } catch (err) {
+    return null;
+  }
+}
+
+async function fetchGoogleFinancePrice(symbol) {
+  const base = getStockBase(symbol);
+  if (!base) return null;
+
+  const exchanges = ["TPE", "TWO"];
+
+  for (const exchange of exchanges) {
+    try {
+      const url = `https://www.google.com/finance/quote/${encodeURIComponent(base)}:${exchange}?hl=zh-TW`;
+      const res = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+          "Accept-Language": "zh-TW,zh;q=0.9,en;q=0.8"
+        }
+      });
+
+      if (!res.ok) continue;
+
+      const html = await res.text();
+      const price = parseGoogleFinancePrice(html);
+
+      if (price !== null) return price;
+    } catch (err) {
+      continue;
+    }
+  }
+
+  return null;
 }
 
 function roundMoney(value) {
@@ -114,25 +225,21 @@ function calculateSell(grossAmount) {
 }
 
 async function fetchCurrentPrice(symbol) {
-  try {
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1d`;
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0"
-      }
-    });
+  // 1) Try Yahoo Finance first with all likely Taiwan suffixes.
+  // Example: 009823.TW can fail, but 009823.TWO works.
+  const yahooCandidates = getYahooSymbolCandidates(symbol);
 
-    if (!res.ok) return null;
-
-    const data = await res.json();
-    const result = data?.chart?.result?.[0];
-    const price = result?.meta?.regularMarketPrice;
-
-    if (!Number.isFinite(Number(price))) return null;
-    return Number(price);
-  } catch (err) {
-    return null;
+  for (const candidate of yahooCandidates) {
+    const price = await fetchYahooCurrentPrice(candidate);
+    if (price !== null) return price;
   }
+
+  // 2) Fallback to Google Finance page parsing.
+  // This is not an official API, so Yahoo remains the preferred source.
+  const googlePrice = await fetchGoogleFinancePrice(symbol);
+  if (googlePrice !== null) return googlePrice;
+
+  return null;
 }
 
 async function getUserTrades(userId) {
@@ -622,7 +729,7 @@ client.on("interactionCreate", async interaction => {
           { name: "總損益", value: formatMoney(totalProfit), inline: true },
           { name: "未實現損益率", value: formatPercent(unrealizedRate), inline: true }
         )
-        .setFooter({ text: "未實現損益已用目前價格估算，並扣除預估賣出手續費與證交稅。" })
+        .setFooter({ text: "未實現損益以 Yahoo Finance／Google Finance 目前價格估算，並扣除預估賣出手續費與證交稅。" })
         .setTimestamp();
 
       const embeds = [summaryEmbed];
